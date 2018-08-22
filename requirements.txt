@@ -1,0 +1,8 @@
+click
+numpy
+torch
+torchtext
+six
+json_lines
+tensorboardX
+h5py
