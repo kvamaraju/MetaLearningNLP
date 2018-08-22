@@ -23,18 +23,27 @@ class MLP(nn.Module):
         self.embedding_layer = nn.Embedding(num_embeddings, embedding_dim)
         if embedding_matrix is not None:
             self.embedding_layer.weight.data.copy_(torch.from_numpy(embedding_matrix))
+            self.embedding_layer.weight.requires_grad = False
 
         layers = [nn.Linear(in_features=4*self.embedding_dim, out_features=hidden_dim), nn.ReLU(),
                   nn.Linear(in_features=hidden_dim, out_features=hidden_dim), nn.ReLU(),
                   nn.Linear(in_features=hidden_dim, out_features=hidden_dim), nn.ReLU(),
-                  nn.Dropout(),
+                  nn.Dropout(0.1),
                   nn.Linear(in_features=hidden_dim, out_features=num_classes)]
 
         self.output = nn.Sequential(*layers)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                torch.nn.init.xavier_normal_(m.weight)
+                if m.bias is not None:
+                    m.bias.data.normal_(std=1e-2)
 
     def forward(self, s1, s2):
-        s1_ = nn.Dropout(0.2)(self.embedding_layer(s1)).sum(dim=1)
-        s2_ = nn.Dropout(0.2)(self.embedding_layer(s2)).sum(dim=1)
+        s1_ = nn.Dropout(0.1)(self.embedding_layer(s1)).sum(dim=1)
+        s2_ = nn.Dropout(0.1)(self.embedding_layer(s2)).sum(dim=1)
         input_ = torch.cat([s1_, s2_, s1_.sub(s2_), s1_.mul(s2_)], dim=1)
         return self.output(input_)
 

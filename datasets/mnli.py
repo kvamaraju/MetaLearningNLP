@@ -3,6 +3,7 @@ import json_lines
 import zipfile
 import h5py
 import numpy as np
+import re
 
 from torch.utils.data import Dataset
 
@@ -20,6 +21,11 @@ class MultiNLIDataset(Dataset):
 
     def __len__(self):
         return len(self.s1)
+
+
+def tokenize(string):
+    string = re.sub(r'\(|\)', '', string)
+    return string.split()
 
 
 def get_multinli(data_path: str,
@@ -75,16 +81,17 @@ def build_vocab(sentences: list,
     if max_len is None:
         max_len = 1000
     for sentence in sentences:
-        if l < len(sentence.split()):
-            l = min(len(sentence.split()), max_len)
-        for i, word in enumerate(sentence.split()):
-            if word not in vocab and i < max_len:
+        tokens = tokenize(sentence)
+        if l < len(tokens):
+            l = min(len(tokens), max_len)
+        for j, word in enumerate(tokens):
+            if word not in vocab and j < max_len:
                 vocab[word] = i
                 i += 1
 
-    vocab['<s>'] = i
-    vocab['</s>'] = i + 1
-    vocab['<p>'] = i + 2
+    vocab['<s>'] = j
+    vocab['</s>'] = j + 1
+    vocab['<p>'] = j + 2
     return vocab, l
 
 
@@ -114,7 +121,7 @@ def format_dataset(dataset: dict,
         sentences = []
         for sentence in dataset[keys]:
             cur_sentence = [vocab['<s>']]
-            word_list = sentence.split()
+            word_list = tokenize(sentence)
             cur_sentence += [vocab[word_list[i]] for i in range(min(len(word_list), max_len-2))]
             cur_sentence += [vocab['</s>']]
             if len(cur_sentence) < max_len:
