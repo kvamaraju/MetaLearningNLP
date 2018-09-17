@@ -73,3 +73,22 @@ def resume_from_checkpoint(resume_path: str,
         return checkpoint['epoch'], checkpoint['best_prec1'], checkpoint['total_steps'], model, optimizer
 
     return 0, 0., 0, model, optimizer
+
+
+def construct_optimizer(optimizer: str,
+                        model: torch.nn.Module,
+                        lr: float) -> torch.optim.Optimizer:
+    if optimizer == 'adam':
+        return torch.optim.Adam(model.parameters(), lr=lr, amsgrad=True)
+    elif optimizer == 'adagrad':
+        return torch.optim.Adagrad(model.parameters(), lr=lr)
+    elif optimizer == 'adamax':
+        return torch.optim.Adamax(model.parameters(), lr=lr)
+    elif optimizer == 'rmsprop':
+        return torch.optim.RMSprop(model.parameters(), lr=lr)
+    elif optimizer == 'rprop':
+        return torch.optim.Rprop(model.parameters(), lr=lr)
+    elif optimizer == 'sgd':
+        return torch.optim.SGD(model.parameters(), lr=lr)
+    else:
+        return torch.optim.Adadelta(model.parameters(), lr=lr)

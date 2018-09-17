@@ -7,8 +7,10 @@ from torch.utils.data import DataLoader
 import torch.backends.cudnn as cudnn
 from tensorboardX import SummaryWriter
 
-from utils import AverageMeter, accuracy, set_directory, save_checkpoint, resume_from_checkpoint
+from utils import AverageMeter, accuracy, set_directory, save_checkpoint, resume_from_checkpoint, construct_optimizer
 from models.mlp import MLP
+from models.transformer import Transformer
+from metalearning import ClassifierTask, MetaTrainWrapper
 
 from datasets.mnli import *
 
@@ -141,19 +143,19 @@ def cli():
 
 
 @cli.command()
-@click.option('--type', type=click.Choice(['mlp']), default='mlp')
+@click.option('--type', type=click.Choice(['mlp', 'transformer']), default='mlp')
+@click.option('--optim', type=click.Choice(['adam', 'adadelta', 'adagrad', 'adamax', 'rmsprop', 'rprop', 'sgd']), default='adadelta')
 @click.option('--lr', default=0.0001, type=float)
 @click.option('--start_epoch', default=0, type=int)
 @click.option('--epochs', default=50, type=int)
-@click.option('--epoch_size', default=20, type=int)
-@click.option('--batch_size', default=50, type=int)
+@click.option('--epoch_size', default=None)
+@click.option('--batch_size', default=200, type=int)
 @click.option('--print_freq', default=100, type=int)
 @click.option('--save_at', type=list, default=[1, 10, 50, 100])
 @click.option('--resume', default='', type=str)
 @click.option('--device', type=int, default=0)
-@click.option('--multi_gpu', default=False)
 def train_mnli(**kwargs):
-    dir = set_directory(name='mlp', type_net='mlp')
+    dir = set_directory(name=kwargs['type'], type_net=kwargs['type'])
     writer = SummaryWriter(dir)
 
     train, dev_matched, vocab = prepare_mnli(root='datasets/data',
@@ -183,6 +185,9 @@ def train_mnli(**kwargs):
     if kwargs['type'] == 'mlp':
         model = MLP(num_embeddings=weight_matrix.shape[0],
                     embedding_matrix=weight_matrix)
+    elif kwargs['type'] == 'transformer':
+        model = Transformer(num_embeddings=weight_matrix.shape[0],
+                            embedding_matrix=weight_matrix)
     else:
         model = None
 
@@ -192,14 +197,15 @@ def train_mnli(**kwargs):
     if torch.cuda.is_available():
         torch.cuda.set_device(kwargs['device'])
 
-    if kwargs['multi_gpu']:
-        model = torch.nn.DataParallel(model).cuda()
+    if torch.cuda.is_available():
+        model = model.cuda()
+        loss_function = torch.nn.CrossEntropyLoss().cuda()
     else:
-        if torch.cuda.is_available():
-            model = model.cuda()
+        loss_function = torch.nn.CrossEntropyLoss()
 
-    optimizer = torch.optim.Adam(model.parameters(),
-                                 lr=kwargs['lr'])
+    optimizer = construct_optimizer(optimizer=kwargs['optim'],
+                                    model=model,
+                                    lr=kwargs['lr'])
 
     if kwargs['resume'] != '':
         kwargs['start_epoch'], best_prec1, total_steps, model, optimizer = resume_from_checkpoint(resume_path=kwargs['resume'],
@@ -211,7 +217,10 @@ def train_mnli(**kwargs):
 
     cudnn.benchmark = True
 
-    loss_function = torch.nn.CrossEntropyLoss().cuda()
+    if kwargs['epoch_size'] is None:
+        epoch_size = None
+    else:
+        epoch_size = kwargs['epoch_size']*kwargs['batch_size']
 
     for epoch in range(kwargs['start_epoch'], kwargs['epochs']):
         total_steps = train_single_epoch(train_loader=train_loader,
@@ -221,7 +230,7 @@ def train_mnli(**kwargs):
                                          epoch=epoch,
                                          total_steps=total_steps,
                                          print_freq=kwargs['print_freq'],
-                                         epoch_size=kwargs['epoch_size']*kwargs['batch_size'],
+                                         epoch_size=epoch_size,
                                          writer=writer)
 
         prec1 = validate(val_loader=val_loader,
@@ -258,20 +267,20 @@ def train_mnli(**kwargs):
 
 
 @cli.command()
-@click.option('--type', type=click.Choice(['mlp']), default='mlp')
+@click.option('--type', type=click.Choice(['mlp', 'transformer']), default='mlp')
+@click.option('--optim', type=click.Choice(['adam', 'adadelta', 'adagrad', 'adamax', 'rmsprop', 'rprop', 'sgd']), default='adadelta')
 @click.option('--k', default=5, type=int)
 @click.option('--lr', default=0.0001, type=float)
 @click.option('--start_epoch', default=0, type=int)
 @click.option('--epochs', default=50, type=int)
-@click.option('--epoch_size', default=20, type=int)
-@click.option('--batch_size', default=100, type=int)
+@click.option('--epoch_size', default=None)
+@click.option('--batch_size', default=200, type=int)
 @click.option('--print_freq', default=100, type=int)
 @click.option('--save_at', type=list, default=[1, 10, 50, 100])
 @click.option('--resume', default='', type=str)
 @click.option('--device', type=int, default=0)
-@click.option('--multi_gpu', default=False)
 def train_mnli_kshot(**kwargs):
-    dir = set_directory(name='mlp', type_net='mlp')
+    dir = set_directory(name=kwargs['type'], type_net=kwargs['type'])
     writer = SummaryWriter(dir)
 
     train, dev_matched_train, test, dev_matched_test, vocab = prepare_mnli_split(root='datasets/data',
@@ -279,8 +288,8 @@ def train_mnli_kshot(**kwargs):
                                                                                  dir='MultiNLI',
                                                                                  name='MultiNLI',
                                                                                  data_path='datasets/data/MultiNLI/multinli_1.0',
-                                                                                 train_genres=[['fiction', 'government', 'slate', 'telephone']],
-                                                                                 test_genres=[['travel']],
+                                                                                 train_genres=[['fiction', 'government', 'telephone']],
+                                                                                 test_genres=[['slate', 'travel']],
                                                                                  max_len=50)
 
     weight_matrix = prepare_glove(glove_path="datasets/GloVe/glove.840B.300d.txt",
@@ -300,8 +309,14 @@ def train_mnli_kshot(**kwargs):
         num_workers=1,
         pin_memory=torch.cuda.is_available())
 
-    model = MLP(num_embeddings=weight_matrix.shape[0],
-                embedding_matrix=weight_matrix)
+    if kwargs['type'] == 'mlp':
+        model = MLP(num_embeddings=weight_matrix.shape[0],
+                    embedding_matrix=weight_matrix)
+    elif kwargs['type'] == 'transformer':
+        model = Transformer(num_embeddings=weight_matrix.shape[0],
+                            embedding_matrix=weight_matrix)
+    else:
+        model = None
 
     num_parameters = sum([p.data.nelement() for p in model.parameters()])
     print(f'Number of model parameters: {num_parameters}')
@@ -309,14 +324,15 @@ def train_mnli_kshot(**kwargs):
     if torch.cuda.is_available():
         torch.cuda.set_device(kwargs['device'])
 
-    if kwargs['multi_gpu']:
-        model = torch.nn.DataParallel(model).cuda()
+    if torch.cuda.is_available():
+        model = model.cuda()
+        loss_function = torch.nn.CrossEntropyLoss().cuda()
     else:
-        if torch.cuda.is_available():
-            model = model.cuda()
+        loss_function = torch.nn.CrossEntropyLoss()
 
-    optimizer = torch.optim.Adam(model.parameters(),
-                                 lr=kwargs['lr'])
+    optimizer = construct_optimizer(optimizer=kwargs['optim'],
+                                    model=model,
+                                    lr=kwargs['lr'])
 
     if kwargs['resume'] != '':
         kwargs['start_epoch'], best_prec1, total_steps, model, optimizer = resume_from_checkpoint(resume_path=kwargs['resume'],
@@ -326,9 +342,12 @@ def train_mnli_kshot(**kwargs):
         total_steps = 0
         best_prec1 = 0.
 
-    cudnn.benchmark = True
+    if kwargs['epoch_size'] is None:
+        epoch_size = None
+    else:
+        epoch_size = kwargs['epoch_size']*kwargs['batch_size']
 
-    loss_function = torch.nn.CrossEntropyLoss().cuda()
+    cudnn.benchmark = True
 
     for epoch in range(kwargs['start_epoch'], kwargs['epochs']):
         total_steps = train_single_epoch(train_loader=train_loader,
@@ -338,7 +357,7 @@ def train_mnli_kshot(**kwargs):
                                          epoch=epoch,
                                          total_steps=total_steps,
                                          print_freq=kwargs['print_freq'],
-                                         epoch_size=kwargs['epoch_size']*kwargs['batch_size'],
+                                         epoch_size=epoch_size,
                                          writer=writer)
 
         prec1 = validate(val_loader=val_loader,
@@ -405,8 +424,9 @@ def train_mnli_kshot(**kwargs):
 
     print(f"{kwargs['k']}-Shot Performance")
 
-    optimizer = torch.optim.Adam(model.parameters(),
-                                 lr=kwargs['lr'])
+    optimizer = construct_optimizer(optimizer=kwargs['optim'],
+                                    model=model,
+                                    lr=kwargs['lr'])
 
     for epoch in range(kwargs['k']):
         train_single_epoch(train_loader=train_loader,
@@ -416,7 +436,7 @@ def train_mnli_kshot(**kwargs):
                            epoch=epoch,
                            total_steps=total_steps,
                            print_freq=kwargs['print_freq'],
-                           epoch_size=kwargs['epoch_size']*kwargs['batch_size'],
+                           epoch_size=epoch_size,
                            writer=writer)
 
         validate(val_loader=val_loader,
@@ -425,6 +445,146 @@ def train_mnli_kshot(**kwargs):
                  epoch=epoch,
                  print_freq=kwargs['print_freq'],
                  writer=writer)
+
+
+@cli.command()
+@click.option('--type', type=click.Choice(['mlp', 'transformer']), default='mlp')
+@click.option('--optim', type=click.Choice(['adam', 'adadelta', 'adagrad', 'adamax', 'rmsprop', 'rprop', 'sgd']), default='sgd')
+@click.option('--k', default=5, type=int)
+@click.option('--lr_inner_meta', default=0.001, type=float)
+@click.option('--lr_outer_meta', default=0.001, type=float)
+@click.option('--num_inner_iterations', default=2, type=int)
+@click.option('--lr_kshot', default=1., type=float)
+@click.option('--epochs', default=1, type=int)
+@click.option('--batch_size', default=200, type=int)
+@click.option('--print_freq', default=100, type=int)
+@click.option('--device', type=int, default=0)
+def train_mnli_meta(**kwargs):
+    train, dev_matched_train, test, dev_matched_test, vocab = prepare_mnli_split(root='datasets/data',
+                                                                                 urls=['https://www.nyu.edu/projects/bowman/multinli/multinli_1.0.zip'],
+                                                                                 dir='MultiNLI',
+                                                                                 name='MultiNLI',
+                                                                                 data_path='datasets/data/MultiNLI/multinli_1.0',
+                                                                                 train_genres=[['fiction'], ['government'], ['telephone']],
+                                                                                 test_genres=[['slate', 'travel']],
+                                                                                 max_len=50)
+
+    weight_matrix = prepare_glove(glove_path="datasets/GloVe/glove.840B.300d.txt",
+                                  vocab=vocab)
+
+    train_loaders = [DataLoader(
+        MultiNLIDataset(dataset=t),
+        batch_size=kwargs['batch_size'],
+        shuffle=True,
+        num_workers=1,
+        pin_memory=torch.cuda.is_available()) for t in train]
+
+    val_loaders = [DataLoader(
+        MultiNLIDataset(dataset=t),
+        batch_size=kwargs['batch_size'],
+        shuffle=True,
+        num_workers=1,
+        pin_memory=torch.cuda.is_available()) for t in dev_matched_train]
+
+    if kwargs['type'] == 'mlp':
+        model = MLP(num_embeddings=weight_matrix.shape[0],
+                    embedding_matrix=weight_matrix)
+    elif kwargs['type'] == 'transformer':
+        model = Transformer(num_embeddings=weight_matrix.shape[0],
+                            embedding_matrix=weight_matrix)
+    else:
+        model = None
+
+    num_parameters = sum([p.data.nelement() for p in model.parameters()])
+    print(f'Number of model parameters: {num_parameters}')
+
+    cudnn.benchmark = True
+
+    if torch.cuda.is_available():
+        torch.cuda.set_device(kwargs['device'])
+
+    if torch.cuda.is_available():
+        model = model.cuda()
+
+    optimizer = construct_optimizer(optimizer=kwargs['optim'],
+                                    model=model,
+                                    lr=kwargs['lr_outer_meta'])
+
+    meta_model = MetaTrainWrapper(module=model,
+                                  inner_lr=kwargs['lr_inner_meta'],
+                                  num_inner_iterations=kwargs['num_inner_iterations'],
+                                  optim=optimizer,
+                                  second_order=True)
+
+    meta_model.train()
+
+    for epoch in range(kwargs['epochs']):
+        meta_model(tasks=[ClassifierTask() for _ in range(len(train_loaders))],
+                   train_loaders=train_loaders,
+                   val_loaders=val_loaders)
+
+        print(f'Epoch {epoch} Validation')
+        for loader in val_loaders:
+            validate(val_loader=loader,
+                     model=model,
+                     criterion=torch.nn.CrossEntropyLoss(),
+                     epoch=epoch,
+                     print_freq=kwargs['print_freq'],
+                     writer=None)
+
+    train_loader = DataLoader(
+        MultiNLIDataset(dataset=test[0]),
+        batch_size=kwargs['batch_size'],
+        shuffle=True,
+        num_workers=1,
+        pin_memory=torch.cuda.is_available())
+
+    val_loader = DataLoader(
+        MultiNLIDataset(dataset=dev_matched_test[0]),
+        batch_size=kwargs['batch_size'],
+        shuffle=True,
+        num_workers=1,
+        pin_memory=torch.cuda.is_available())
+
+    print('Zero Shot Performance')
+
+    validate(val_loader=train_loader,
+             model=model,
+             criterion=torch.nn.CrossEntropyLoss(),
+             epoch=0,
+             print_freq=kwargs['print_freq'],
+             writer=None)
+
+    validate(val_loader=val_loader,
+             model=model,
+             criterion=torch.nn.CrossEntropyLoss(),
+             epoch=0,
+             print_freq=kwargs['print_freq'],
+             writer=None)
+
+    print(f"{kwargs['k']}-Shot Performance")
+
+    optimizer = construct_optimizer(optimizer=kwargs['optim'],
+                                    model=model,
+                                    lr=kwargs['lr_kshot'])
+
+    for epoch in range(kwargs['k']):
+        train_single_epoch(train_loader=train_loader,
+                           model=model,
+                           criterion=torch.nn.CrossEntropyLoss(),
+                           optimizer=optimizer,
+                           epoch=epoch,
+                           total_steps=epoch,
+                           print_freq=kwargs['print_freq'],
+                           epoch_size=None,
+                           writer=None)
+
+        validate(val_loader=val_loader,
+                 model=model,
+                 criterion=torch.nn.CrossEntropyLoss(),
+                 epoch=epoch,
+                 print_freq=kwargs['print_freq'],
+                 writer=None)
 
 
 if __name__ == '__main__':
