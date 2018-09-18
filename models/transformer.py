@@ -53,7 +53,11 @@ class Transformer(nn.Module):
                   nn.ReLU()]
         return nn.Sequential(*layers)
 
-    def forward(self, s1, s2):
+    def forward(self,
+                s1: torch.Tensor,
+                s2: torch.Tensor,
+                l1: torch.Tensor,
+                l2: torch.Tensor):
         s1_ = self.input_layer(self.embedding_layer(s1))
         s2_ = self.input_layer(self.embedding_layer(s2))
 

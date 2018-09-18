@@ -41,7 +41,11 @@ class MLP(nn.Module):
                 if m.bias is not None:
                     m.bias.data.normal_(std=1e-2)
 
-    def forward(self, s1, s2):
+    def forward(self,
+                s1: torch.Tensor,
+                s2: torch.Tensor,
+                l1: torch.Tensor,
+                l2: torch.Tensor):
         s1_ = nn.Dropout(0.1)(self.embedding_layer(s1)).sum(dim=1)
         s2_ = nn.Dropout(0.1)(self.embedding_layer(s2)).sum(dim=1)
         input_ = torch.cat([s1_, s2_, s1_.sub(s2_), s1_.mul(s2_)], dim=1)
