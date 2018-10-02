@@ -2,6 +2,12 @@ import os
 import shutil
 import torch
 
+import numpy as np
+
+from models.mlp import MLP
+from models.transformer import Transformer
+from models.bilstm import ResBiLSTM
+
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -92,3 +98,19 @@ def construct_optimizer(optimizer: str,
         return torch.optim.SGD(model.parameters(), lr=lr)
     else:
         return torch.optim.Adadelta(model.parameters(), lr=lr)
+
+
+def construct_model(model_type: str,
+                    weight_matrix: np.ndarray) -> torch.nn.Module:
+    if model_type == 'mlp':
+        model = MLP(num_embeddings=weight_matrix.shape[0],
+                    embedding_matrix=weight_matrix)
+    elif model_type == 'transformer':
+        model = Transformer(num_embeddings=weight_matrix.shape[0],
+                            embedding_matrix=weight_matrix)
+    elif model_type == 'lstm':
+        model = ResBiLSTM(num_embeddings=weight_matrix.shape[0],
+                          embedding_matrix=weight_matrix)
+    else:
+        model = None
+    return model

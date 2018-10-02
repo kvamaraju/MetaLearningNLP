@@ -7,9 +7,7 @@ from torch.utils.data import DataLoader
 import torch.backends.cudnn as cudnn
 from tensorboardX import SummaryWriter
 
-from utils import AverageMeter, accuracy, set_directory, save_checkpoint, resume_from_checkpoint, construct_optimizer
-from models.mlp import MLP
-from models.transformer import Transformer
+from utils import AverageMeter, accuracy, set_directory, save_checkpoint, resume_from_checkpoint, construct_optimizer, construct_model
 from metalearning import ClassifierTask, MetaTrainWrapper
 
 from datasets.mnli import *
@@ -23,8 +21,7 @@ def train_single_epoch(train_loader: Iterable,
                        total_steps: int,
                        print_freq: int,
                        writer: SummaryWriter,
-                       epoch_size: int = None,
-                       shape: list = None) -> int:
+                       num_batches: int = None) -> int:
 
     batch_time = AverageMeter()
     losses = AverageMeter()
@@ -34,7 +31,8 @@ def train_single_epoch(train_loader: Iterable,
 
     end = time.time()
     ema_loss, steps = 0, 0
-    for i, (s1, s2, target) in enumerate(train_loader):
+
+    for i, (s1, s2, target, l1, l2) in enumerate(train_loader):
         steps += 1
         total_steps += 1
 
@@ -42,18 +40,18 @@ def train_single_epoch(train_loader: Iterable,
             target = target.cuda(async=True)
             s1 = s1.cuda()
             s2 = s2.cuda()
+            l1 = l1.cuda()
+            l2 = l2.cuda()
 
-        if shape is None:
-            s1_var = torch.autograd.Variable(s1)
-            s2_var = torch.autograd.Variable(s2)
-        else:
-            s1_var = torch.autograd.Variable(s1.view(shape))
-            s2_var = torch.autograd.Variable(s2.view(shape))
+        s1_var = torch.autograd.Variable(s1)
+        s2_var = torch.autograd.Variable(s2)
+        l1_var = torch.autograd.Variable(l1)
+        l2_var = torch.autograd.Variable(l2)
         target_var = torch.autograd.Variable(target)
 
         optimizer.zero_grad()
 
-        output = model(s1_var, s2_var)
+        output = model(s1_var, s2_var, l1_var, l2_var)
         loss = criterion(output, target_var)
 
         loss.backward()
@@ -72,8 +70,8 @@ def train_single_epoch(train_loader: Iterable,
                   f'Loss {losses.val:.4f} ({losses.avg:.4f})\t' +
                   f'Prec@1 {top1.val:.3f} ({top1.avg:.3f})')
 
-        if epoch_size is not None:
-            if steps > epoch_size:
+        if num_batches is not None:
+            if steps > num_batches:
                 break
 
     if writer is not None:
@@ -88,8 +86,7 @@ def validate(val_loader: Iterable,
              criterion: torch.nn.modules.loss,
              epoch: int,
              print_freq: int,
-             writer: SummaryWriter,
-             shape: list = None) -> float:
+             writer: SummaryWriter) -> float:
 
     batch_time = AverageMeter()
     losses = AverageMeter()
@@ -98,21 +95,21 @@ def validate(val_loader: Iterable,
     model.eval()
 
     end = time.time()
-    for i, (s1, s2, target) in enumerate(val_loader):
+    for i, (s1, s2, target, l1, l2) in enumerate(val_loader):
         if torch.cuda.is_available():
             target = target.cuda(async=True)
             s1 = s1.cuda()
             s2 = s2.cuda()
+            l1 = l1.cuda()
+            l2 = l2.cuda()
 
-        if shape is None:
-            s1_var = torch.autograd.Variable(s1)
-            s2_var = torch.autograd.Variable(s2)
-        else:
-            s1_var = torch.autograd.Variable(s1.view(shape))
-            s2_var = torch.autograd.Variable(s2.view(shape))
+        s1_var = torch.autograd.Variable(s1)
+        s2_var = torch.autograd.Variable(s2)
+        l1_var = torch.autograd.Variable(l1)
+        l2_var = torch.autograd.Variable(l2)
         target_var = torch.autograd.Variable(target)
 
-        output = model(s1_var, s2_var)
+        output = model(s1_var, s2_var, l1_var, l2_var)
         loss = criterion(output, target_var)
 
         prec1 = accuracy(output.data, target, topk=(1,))[0]
@@ -143,12 +140,11 @@ def cli():
 
 
 @cli.command()
-@click.option('--type', type=click.Choice(['mlp', 'transformer']), default='mlp')
-@click.option('--optim', type=click.Choice(['adam', 'adadelta', 'adagrad', 'adamax', 'rmsprop', 'rprop', 'sgd']), default='adadelta')
-@click.option('--lr', default=0.0001, type=float)
+@click.option('--type', type=click.Choice(['mlp', 'transformer', 'lstm']), default='mlp')
+@click.option('--optim', type=click.Choice(['adam', 'adadelta', 'adagrad', 'adamax', 'rmsprop', 'rprop', 'sgd']), default='adam')
+@click.option('--lr', default=0.001, type=float)
 @click.option('--start_epoch', default=0, type=int)
 @click.option('--epochs', default=50, type=int)
-@click.option('--epoch_size', default=None)
 @click.option('--batch_size', default=200, type=int)
 @click.option('--print_freq', default=100, type=int)
 @click.option('--save_at', type=list, default=[1, 10, 50, 100])
@@ -163,7 +159,7 @@ def train_mnli(**kwargs):
                                              dir='MultiNLI',
                                              name='MultiNLI',
                                              data_path='datasets/data/MultiNLI/multinli_1.0',
-                                             max_len=50)
+                                             max_len=60)
 
     weight_matrix = prepare_glove(glove_path="datasets/GloVe/glove.840B.300d.txt",
                                   vocab=vocab)
@@ -182,14 +178,8 @@ def train_mnli(**kwargs):
         num_workers=1,
         pin_memory=torch.cuda.is_available())
 
-    if kwargs['type'] == 'mlp':
-        model = MLP(num_embeddings=weight_matrix.shape[0],
-                    embedding_matrix=weight_matrix)
-    elif kwargs['type'] == 'transformer':
-        model = Transformer(num_embeddings=weight_matrix.shape[0],
-                            embedding_matrix=weight_matrix)
-    else:
-        model = None
+    model = construct_model(model_type=kwargs['type'],
+                            weight_matrix=weight_matrix)
 
     num_parameters = sum([p.data.nelement() for p in model.parameters()])
     print(f'Number of model parameters: {num_parameters}')
@@ -217,11 +207,6 @@ def train_mnli(**kwargs):
 
     cudnn.benchmark = True
 
-    if kwargs['epoch_size'] is None:
-        epoch_size = None
-    else:
-        epoch_size = kwargs['epoch_size']*kwargs['batch_size']
-
     for epoch in range(kwargs['start_epoch'], kwargs['epochs']):
         total_steps = train_single_epoch(train_loader=train_loader,
                                          model=model,
@@ -230,7 +215,6 @@ def train_mnli(**kwargs):
                                          epoch=epoch,
                                          total_steps=total_steps,
                                          print_freq=kwargs['print_freq'],
-                                         epoch_size=epoch_size,
                                          writer=writer)
 
         prec1 = validate(val_loader=val_loader,
@@ -267,14 +251,14 @@ def train_mnli(**kwargs):
 
 
 @cli.command()
-@click.option('--type', type=click.Choice(['mlp', 'transformer']), default='mlp')
-@click.option('--optim', type=click.Choice(['adam', 'adadelta', 'adagrad', 'adamax', 'rmsprop', 'rprop', 'sgd']), default='adadelta')
+@click.option('--type', type=click.Choice(['mlp', 'transformer', 'lstm']), default='mlp')
+@click.option('--optim', type=click.Choice(['adam', 'adadelta', 'adagrad', 'adamax', 'rmsprop', 'rprop', 'sgd']), default='adam')
 @click.option('--k', default=5, type=int)
-@click.option('--lr', default=0.0001, type=float)
+@click.option('--lr', default=0.001, type=float)
+@click.option('--lr_kshot', default=0.0001, type=float)
 @click.option('--start_epoch', default=0, type=int)
 @click.option('--epochs', default=50, type=int)
-@click.option('--epoch_size', default=None)
-@click.option('--batch_size', default=200, type=int)
+@click.option('--batch_size', default=100, type=int)
 @click.option('--print_freq', default=100, type=int)
 @click.option('--save_at', type=list, default=[1, 10, 50, 100])
 @click.option('--resume', default='', type=str)
@@ -290,7 +274,7 @@ def train_mnli_kshot(**kwargs):
                                                                                  data_path='datasets/data/MultiNLI/multinli_1.0',
                                                                                  train_genres=[['fiction', 'government', 'telephone']],
                                                                                  test_genres=[['slate', 'travel']],
-                                                                                 max_len=50)
+                                                                                 max_len=60)
 
     weight_matrix = prepare_glove(glove_path="datasets/GloVe/glove.840B.300d.txt",
                                   vocab=vocab)
@@ -309,14 +293,8 @@ def train_mnli_kshot(**kwargs):
         num_workers=1,
         pin_memory=torch.cuda.is_available())
 
-    if kwargs['type'] == 'mlp':
-        model = MLP(num_embeddings=weight_matrix.shape[0],
-                    embedding_matrix=weight_matrix)
-    elif kwargs['type'] == 'transformer':
-        model = Transformer(num_embeddings=weight_matrix.shape[0],
-                            embedding_matrix=weight_matrix)
-    else:
-        model = None
+    model = construct_model(model_type=kwargs['type'],
+                            weight_matrix=weight_matrix)
 
     num_parameters = sum([p.data.nelement() for p in model.parameters()])
     print(f'Number of model parameters: {num_parameters}')
@@ -342,11 +320,6 @@ def train_mnli_kshot(**kwargs):
         total_steps = 0
         best_prec1 = 0.
 
-    if kwargs['epoch_size'] is None:
-        epoch_size = None
-    else:
-        epoch_size = kwargs['epoch_size']*kwargs['batch_size']
-
     cudnn.benchmark = True
 
     for epoch in range(kwargs['start_epoch'], kwargs['epochs']):
@@ -357,7 +330,6 @@ def train_mnli_kshot(**kwargs):
                                          epoch=epoch,
                                          total_steps=total_steps,
                                          print_freq=kwargs['print_freq'],
-                                         epoch_size=epoch_size,
                                          writer=writer)
 
         prec1 = validate(val_loader=val_loader,
@@ -426,9 +398,9 @@ def train_mnli_kshot(**kwargs):
 
     optimizer = construct_optimizer(optimizer=kwargs['optim'],
                                     model=model,
-                                    lr=kwargs['lr'])
+                                    lr=kwargs['lr_kshot'])
 
-    for epoch in range(kwargs['k']):
+    for i in range(kwargs['k']):
         train_single_epoch(train_loader=train_loader,
                            model=model,
                            criterion=loss_function,
@@ -436,7 +408,7 @@ def train_mnli_kshot(**kwargs):
                            epoch=epoch,
                            total_steps=total_steps,
                            print_freq=kwargs['print_freq'],
-                           epoch_size=epoch_size,
+                           num_batches=1,
                            writer=writer)
 
         validate(val_loader=val_loader,
@@ -448,15 +420,16 @@ def train_mnli_kshot(**kwargs):
 
 
 @cli.command()
-@click.option('--type', type=click.Choice(['mlp', 'transformer']), default='mlp')
+@click.option('--type', type=click.Choice(['mlp', 'transformer', 'lstm']), default='mlp')
 @click.option('--optim', type=click.Choice(['adam', 'adadelta', 'adagrad', 'adamax', 'rmsprop', 'rprop', 'sgd']), default='sgd')
+@click.option('--use_maml', type=bool, default=True)
 @click.option('--k', default=5, type=int)
-@click.option('--lr_inner_meta', default=0.001, type=float)
-@click.option('--lr_outer_meta', default=0.001, type=float)
-@click.option('--num_inner_iterations', default=2, type=int)
-@click.option('--lr_kshot', default=1., type=float)
+@click.option('--lr_inner_meta', default=0.1, type=float)
+@click.option('--lr_outer_meta', default=0.1, type=float)
+@click.option('--num_inner_iterations', default=4, type=int)
+@click.option('--lr_kshot', default=0.1, type=float)
 @click.option('--epochs', default=1, type=int)
-@click.option('--batch_size', default=200, type=int)
+@click.option('--batch_size', default=100, type=int)
 @click.option('--print_freq', default=100, type=int)
 @click.option('--device', type=int, default=0)
 def train_mnli_meta(**kwargs):
@@ -467,7 +440,7 @@ def train_mnli_meta(**kwargs):
                                                                                  data_path='datasets/data/MultiNLI/multinli_1.0',
                                                                                  train_genres=[['fiction'], ['government'], ['telephone']],
                                                                                  test_genres=[['slate', 'travel']],
-                                                                                 max_len=50)
+                                                                                 max_len=60)
 
     weight_matrix = prepare_glove(glove_path="datasets/GloVe/glove.840B.300d.txt",
                                   vocab=vocab)
@@ -486,14 +459,8 @@ def train_mnli_meta(**kwargs):
         num_workers=1,
         pin_memory=torch.cuda.is_available()) for t in dev_matched_train]
 
-    if kwargs['type'] == 'mlp':
-        model = MLP(num_embeddings=weight_matrix.shape[0],
-                    embedding_matrix=weight_matrix)
-    elif kwargs['type'] == 'transformer':
-        model = Transformer(num_embeddings=weight_matrix.shape[0],
-                            embedding_matrix=weight_matrix)
-    else:
-        model = None
+    model = construct_model(model_type=kwargs['type'],
+                            weight_matrix=weight_matrix)
 
     num_parameters = sum([p.data.nelement() for p in model.parameters()])
     print(f'Number of model parameters: {num_parameters}')
@@ -505,6 +472,9 @@ def train_mnli_meta(**kwargs):
 
     if torch.cuda.is_available():
         model = model.cuda()
+        loss_function = torch.nn.CrossEntropyLoss().cuda()
+    else:
+        loss_function = torch.nn.CrossEntropyLoss()
 
     optimizer = construct_optimizer(optimizer=kwargs['optim'],
                                     model=model,
@@ -512,6 +482,8 @@ def train_mnli_meta(**kwargs):
 
     meta_model = MetaTrainWrapper(module=model,
                                   inner_lr=kwargs['lr_inner_meta'],
+                                  epsilon=kwargs['lr_outer_meta'],
+                                  use_maml=kwargs['use_maml'],
                                   num_inner_iterations=kwargs['num_inner_iterations'],
                                   optim=optimizer,
                                   second_order=True)
@@ -527,7 +499,7 @@ def train_mnli_meta(**kwargs):
         for loader in val_loaders:
             validate(val_loader=loader,
                      model=model,
-                     criterion=torch.nn.CrossEntropyLoss(),
+                     criterion=loss_function,
                      epoch=epoch,
                      print_freq=kwargs['print_freq'],
                      writer=None)
@@ -550,14 +522,14 @@ def train_mnli_meta(**kwargs):
 
     validate(val_loader=train_loader,
              model=model,
-             criterion=torch.nn.CrossEntropyLoss(),
+             criterion=loss_function,
              epoch=0,
              print_freq=kwargs['print_freq'],
              writer=None)
 
     validate(val_loader=val_loader,
              model=model,
-             criterion=torch.nn.CrossEntropyLoss(),
+             criterion=loss_function,
              epoch=0,
              print_freq=kwargs['print_freq'],
              writer=None)
@@ -571,17 +543,17 @@ def train_mnli_meta(**kwargs):
     for epoch in range(kwargs['k']):
         train_single_epoch(train_loader=train_loader,
                            model=model,
-                           criterion=torch.nn.CrossEntropyLoss(),
+                           criterion=loss_function,
                            optimizer=optimizer,
                            epoch=epoch,
                            total_steps=epoch,
                            print_freq=kwargs['print_freq'],
-                           epoch_size=None,
+                           num_batches=1,
                            writer=None)
 
         validate(val_loader=val_loader,
                  model=model,
-                 criterion=torch.nn.CrossEntropyLoss(),
+                 criterion=loss_function,
                  epoch=epoch,
                  print_freq=kwargs['print_freq'],
                  writer=None)

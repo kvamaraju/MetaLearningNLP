@@ -13,11 +13,13 @@ class MultiNLIDataset(Dataset):
                  dataset: dict):
         self.s1 = dataset['s1']
         self.s2 = dataset['s2']
+        self.l1 = dataset['l1']
+        self.l2 = dataset['l2']
         self.label = dataset['label']
-        assert len(self.s1) == len(self.s2) == len(self.label)
+        assert len(self.s1) == len(self.s2) == len(self.label) == len(self.l1) == len(self.l2)
 
     def __getitem__(self, index):
-        return self.s1[index], self.s2[index], self.label[index]
+        return self.s1[index], self.s2[index], self.label[index], self.l1[index], self.l2[index]
 
     def __len__(self):
         return len(self.s1)
@@ -116,18 +118,26 @@ def build_vocab_vectors_with_glove(vocab: dict,
 
 def format_dataset(dataset: dict,
                    vocab: dict,
-                   max_len: int) -> dict:
+                   max_len: int,
+                   enable_padding: bool = True) -> dict:
     for keys in ['s1', 's2']:
         sentences = []
+        lengths = []
         for sentence in dataset[keys]:
             cur_sentence = [vocab['<s>']]
             word_list = tokenize(sentence)
             cur_sentence += [vocab[word_list[i]] for i in range(min(len(word_list), max_len-2))]
             cur_sentence += [vocab['</s>']]
-            if len(cur_sentence) < max_len:
-                cur_sentence += [vocab['<p>']] * (max_len - len(cur_sentence))
+            lengths.append(len(cur_sentence))
+            if enable_padding:
+                if len(cur_sentence) < max_len:
+                    cur_sentence += [vocab['<p>']] * (max_len - len(cur_sentence))
             sentences.append(cur_sentence)
         dataset[keys] = np.array(sentences)
+        if keys == 's1':
+            dataset['l1'] = np.array(lengths)
+        elif keys == 's2':
+            dataset['l2'] = np.array(lengths)
 
     return dataset
 
