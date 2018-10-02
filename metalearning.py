@@ -19,8 +19,9 @@ class ClassifierTask(nn.Module):
 
     def forward(self,
                 module: torch.nn.Module,
-                *inputs: tuple,
+                inputs: tuple,
                 **kwargs):
+
         s1 = inputs[0]
         s2 = inputs[1]
         target = inputs[2]
@@ -45,39 +46,31 @@ class GradientTaskModule(nn.Module):
     def forward(self,
                 task: ClassifierTask,
                 module: torch.nn.Module,
-                input_loader: Iterable,
+                input_batch: Iterable,
                 params_for_grad: list,
                 compute_grad: bool = True,
                 create_graph: bool = False,
-                gradient_average: float = 1.,):
-        rtn_grads = [None] * len(params_for_grad)
+                gradient_average: float = 1., ):
 
-        for i, input in enumerate(input_loader):
-            criterion = task(module, *input)
-            if compute_grad:
-                grads = torch.autograd.grad(criterion / gradient_average, params_for_grad, create_graph=create_graph)
-                if i == 0:
-                    rtn_grads = grads
-                else:
-                    rtn_grads = [g1 + g2 for g1, g2 in zip(rtn_grads, grads)]
-                del grads
-
-        return rtn_grads
+        criterion = task(module=module,
+                         inputs=input_batch)
+        if compute_grad:
+            return torch.autograd.grad(criterion / gradient_average, params_for_grad,
+                                       create_graph=create_graph,
+                                       allow_unused=True)
 
 
 class MAML(nn.Module):
     def __init__(self,
                  module: torch.nn.Module,
-                 num_inner_iterations: int,
                  inner_lr: float,
                  second_order: bool = False,
                  distributed: bool = False):
         super(MAML, self).__init__()
         self.module = module
-        self.num_inner_iterations = num_inner_iterations
         self.inner_lr = inner_lr
         self.second_order = second_order
-        self.maml_task = GradientTaskModule()
+        self.gradient_task = GradientTaskModule()
         self.distributed = distributed
         if self.distributed:
             for p in self.module.state_dict().values():
@@ -86,22 +79,20 @@ class MAML(nn.Module):
 
     def forward(self,
                 tasks: list,
-                train_loaders: list,
+                train_batch: list,
                 val_loaders: list):
 
         meta_grad_dict = grad_dict(self.module, clone=True)
         meta_param_dict = param_dict(self.module, clone=True)
 
-        self.metabatch_size = train_loaders[0].batch_size
+        assert len(tasks) == len(train_batch) == len(val_loaders)
 
-        assert len(tasks) == len(train_loaders) == len(val_loaders)
-
-        for i, _ in enumerate(train_loaders):
+        for i, _ in enumerate(train_batch):
             load_param_dict(self.module, meta_param_dict)
             params_for_grad = get_params_for_grad(self.module)
 
             self.inner_loop(task=tasks[i],
-                            loader=train_loaders[i],
+                            loader=train_batch[i],
                             params_for_grad=params_for_grad)
 
             self.outer_loop(task=tasks[i],
@@ -120,13 +111,13 @@ class MAML(nn.Module):
                    params_for_grad: list):
         training_status = self.training
         self.module.train()
-        for i in range(self.num_inner_iterations):
+        for input_batch in loader:
             with torch.enable_grad():
-                grads = self.maml_task(task=task,
-                                       module=self.module,
-                                       input_loader=loader,
-                                       params_for_grad=params_for_grad,
-                                       create_graph=self.second_order and self.training)
+                grads = self.gradient_task(task=task,
+                                           module=self.module,
+                                           input_batch=input_batch,
+                                           params_for_grad=params_for_grad,
+                                           create_graph=self.second_order and self.training)
                 new_params = grad_step_params(params=params_for_grad,
                                               grads=grads,
                                               lr=self.inner_lr,
@@ -141,33 +132,31 @@ class MAML(nn.Module):
                    params_for_grad: list):
         if not self.second_order:
             params_for_grad = get_params_for_grad(module=self.module)
-        grads = self.maml_task(task=task,
-                               module=self.module,
-                               input_loader=loader,
-                               params_for_grad=params_for_grad,
-                               compute_grad=self.training,
-                               gradient_average=self.metabatch_size)
-        set_grads_for_params(params=params_for_grad,
-                             grads=grads)
-        set_params_with_grad(module=self.module,
-                             params=params_for_grad)
+
+        for batch in loader:
+            grads = self.gradient_task(task=task,
+                                       module=self.module,
+                                       input_batch=batch,
+                                       params_for_grad=params_for_grad,
+                                       compute_grad=self.training,
+                                       gradient_average=len(batch[0]))
+            set_grads_for_params(params=params_for_grad,
+                                 grads=grads)
+            set_params_with_grad(module=self.module,
+                                 params=params_for_grad)
 
 
 class Reptile(nn.Module):
     def __init__(self,
                  module: torch.nn.Module,
-                 num_inner_iterations: int,
                  inner_lr: float,
-                 epsilon: float,
                  second_order: bool = False,
                  distributed: bool = False):
         super(Reptile, self).__init__()
         self.module = module
-        self.num_inner_iterations = num_inner_iterations
         self.inner_lr = inner_lr
-        self.epsilon = epsilon
         self.second_order = second_order
-        self.maml_task = GradientTaskModule()
+        self.gradient_task = GradientTaskModule()
         self.distributed = distributed
         if self.distributed:
             for p in self.module.state_dict().values():
@@ -176,12 +165,12 @@ class Reptile(nn.Module):
 
     def forward(self,
                 tasks: list,
-                train_loaders: list,
+                train_batch: list,
                 val_loaders: list):
 
         meta_param_dict = param_dict(self.module, clone=True)
 
-        assert len(tasks) == len(train_loaders) == len(val_loaders)
+        assert len(tasks) == len(train_batch)
 
         i = np.random.choice(range(len(tasks)))
 
@@ -189,12 +178,12 @@ class Reptile(nn.Module):
         params_for_grad = get_params_for_grad(self.module)
 
         new_params = self.inner_loop(task=tasks[i],
-                                     loader=train_loaders[i],
+                                     loader=train_batch[i],
                                      params_for_grad=params_for_grad)
 
-        self.update_params(old_params=params_for_grad,
-                           new_params=new_params,
-                           epsilon=self.epsilon)
+        grads = [x - y for x, y in zip(params_for_grad, new_params)]
+
+        set_grads_for_params(params=params_for_grad, grads=grads)
 
         if self.distributed:
             reduce_gradients(self.module)
@@ -203,15 +192,17 @@ class Reptile(nn.Module):
                    task: ClassifierTask,
                    loader: Iterable,
                    params_for_grad: list) -> list:
+
         training_status = self.training
         self.module.train()
-        for i in range(self.num_inner_iterations):
+
+        for input_batch in loader:
             with torch.enable_grad():
-                grads = self.maml_task(task=task,
-                                       module=self.module,
-                                       input_loader=loader,
-                                       params_for_grad=params_for_grad,
-                                       create_graph=self.second_order and self.training)
+                grads = self.gradient_task(task=task,
+                                           module=self.module,
+                                           input_batch=input_batch,
+                                           params_for_grad=params_for_grad,
+                                           create_graph=self.second_order and self.training)
                 new_params = grad_step_params(params=params_for_grad,
                                               grads=grads,
                                               lr=self.inner_lr,
@@ -221,23 +212,12 @@ class Reptile(nn.Module):
         self.module.train(training_status)
         return new_params
 
-    def update_params(self,
-                      old_params: list,
-                      new_params: list,
-                      epsilon: float):
-
-        assert len(old_params) == len(new_params)
-        set_params_with_grad(module=self.module,
-                             params=[old_params[i] + epsilon * (new_params[i] - old_params[i]) for i, _ in enumerate(old_params)])
-
 
 class MetaTrainWrapper(nn.Module):
     def __init__(self,
                  module: nn.Module,
                  inner_lr: float,
-                 epsilon: float,
                  use_maml: bool = True,
-                 num_inner_iterations: int = 1,
                  optim: torch.optim.Optimizer = None,
                  second_order: bool = False,
                  distributed: bool = False,
@@ -251,14 +231,11 @@ class MetaTrainWrapper(nn.Module):
 
         if use_maml:
             self.meta_module = MAML(module=self.module,
-                                    num_inner_iterations=num_inner_iterations,
                                     inner_lr=inner_lr,
                                     second_order=second_order)
         else:
             self.meta_module = Reptile(module=self.module,
-                                       num_inner_iterations=num_inner_iterations,
                                        inner_lr=inner_lr,
-                                       epsilon=epsilon,
                                        second_order=second_order)
 
     def train(self, mode=True):
@@ -271,7 +248,7 @@ class MetaTrainWrapper(nn.Module):
 
     def forward(self,
                 tasks: list,
-                train_loaders: list,
+                train_batch: list,
                 val_loaders: list):
         for group in self.optim.param_groups:
             for p in group['params']:
@@ -280,16 +257,13 @@ class MetaTrainWrapper(nn.Module):
         self.optim.zero_grad()
         if self.training:
             self.meta_module(tasks=tasks,
-                             train_loaders=train_loaders,
+                             train_batch=train_batch,
                              val_loaders=val_loaders)
-            if isinstance(self.meta_module, MAML):
-                self.optim.step()
-            else:
-                self.optim.zero_grad()
+            self.optim.step()
         else:
             with torch.no_grad():
                 self.meta_module(tasks=tasks,
-                                 train_loaders=train_loaders,
+                                 train_loaders=train_batch,
                                  val_loaders=val_loaders)
 
     def init_distributed(self, world_size=1, rank=-1):
@@ -467,7 +441,7 @@ def get_params_for_grad(module: torch.nn.Module,
 def set_params_with_grad(module: torch.nn.Module,
                          params: list):
     j = 0
-    for i, (name, param) in enumerate(module.named_parameters()):
+    for _, (_, param) in enumerate(module.named_parameters()):
         if param is not None and param.requires_grad:
             param = params[j]
             j += 1

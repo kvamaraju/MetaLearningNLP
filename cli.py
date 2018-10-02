@@ -1,6 +1,7 @@
 import click
 import time
-from typing import Iterable
+
+from tqdm import tqdm
 
 import torch
 from torch.utils.data import DataLoader
@@ -400,13 +401,16 @@ def train_mnli_kshot(**kwargs):
                                     model=model,
                                     lr=kwargs['lr_kshot'])
 
-    for i in range(kwargs['k']):
-        train_single_epoch(train_loader=train_loader,
+    train_batcher = Batcher(loaders=[train_loader],
+                            batch_size=1)
+
+    for i, train_batch in enumerate(train_batcher):
+        train_single_epoch(train_loader=train_batch[0],
                            model=model,
                            criterion=loss_function,
                            optimizer=optimizer,
-                           epoch=epoch,
-                           total_steps=total_steps,
+                           epoch=i,
+                           total_steps=0,
                            print_freq=kwargs['print_freq'],
                            num_batches=1,
                            writer=writer)
@@ -414,21 +418,24 @@ def train_mnli_kshot(**kwargs):
         validate(val_loader=val_loader,
                  model=model,
                  criterion=loss_function,
-                 epoch=epoch,
+                 epoch=i,
                  print_freq=kwargs['print_freq'],
                  writer=writer)
+
+        if i >= kwargs['k']:
+            break
 
 
 @cli.command()
 @click.option('--type', type=click.Choice(['mlp', 'transformer', 'lstm']), default='mlp')
-@click.option('--optim', type=click.Choice(['adam', 'adadelta', 'adagrad', 'adamax', 'rmsprop', 'rprop', 'sgd']), default='sgd')
+@click.option('--optim', type=click.Choice(['adam', 'adadelta', 'adagrad', 'adamax', 'rmsprop', 'rprop', 'sgd']), default='adam')
 @click.option('--use_maml', type=bool, default=True)
 @click.option('--k', default=5, type=int)
-@click.option('--lr_inner_meta', default=0.1, type=float)
-@click.option('--lr_outer_meta', default=0.1, type=float)
-@click.option('--num_inner_iterations', default=4, type=int)
-@click.option('--lr_kshot', default=0.1, type=float)
-@click.option('--epochs', default=1, type=int)
+@click.option('--lr_inner_meta', default=0.001, type=float)
+@click.option('--lr_outer_meta', default=0.001, type=float)
+@click.option('--num_inner_iterations', default=1, type=int)
+@click.option('--lr_kshot', default=0.001, type=float)
+@click.option('--epochs', default=20, type=int)
 @click.option('--batch_size', default=100, type=int)
 @click.option('--print_freq', default=100, type=int)
 @click.option('--device', type=int, default=0)
@@ -454,7 +461,7 @@ def train_mnli_meta(**kwargs):
 
     val_loaders = [DataLoader(
         MultiNLIDataset(dataset=t),
-        batch_size=kwargs['batch_size'],
+        batch_size=2000,
         shuffle=True,
         num_workers=1,
         pin_memory=torch.cuda.is_available()) for t in dev_matched_train]
@@ -482,20 +489,20 @@ def train_mnli_meta(**kwargs):
 
     meta_model = MetaTrainWrapper(module=model,
                                   inner_lr=kwargs['lr_inner_meta'],
-                                  epsilon=kwargs['lr_outer_meta'],
                                   use_maml=kwargs['use_maml'],
-                                  num_inner_iterations=kwargs['num_inner_iterations'],
                                   optim=optimizer,
                                   second_order=True)
 
+    train_batcher = Batcher(loaders=train_loaders,
+                            batch_size=kwargs['num_inner_iterations'])
     meta_model.train()
-
     for epoch in range(kwargs['epochs']):
-        meta_model(tasks=[ClassifierTask() for _ in range(len(train_loaders))],
-                   train_loaders=train_loaders,
-                   val_loaders=val_loaders)
+        for train_batch in tqdm(train_batcher):
+            meta_model(tasks=[ClassifierTask() for _ in range(len(train_loaders))],
+                       train_batch=train_batch,
+                       val_loaders=val_loaders)
 
-        print(f'Epoch {epoch} Validation')
+        print(f'Epoch {epoch + 1} Validation')
         for loader in val_loaders:
             validate(val_loader=loader,
                      model=model,
@@ -540,13 +547,16 @@ def train_mnli_meta(**kwargs):
                                     model=model,
                                     lr=kwargs['lr_kshot'])
 
-    for epoch in range(kwargs['k']):
-        train_single_epoch(train_loader=train_loader,
+    train_batcher = Batcher(loaders=[train_loader],
+                            batch_size=1)
+
+    for i, train_batch in enumerate(train_batcher):
+        train_single_epoch(train_loader=train_batch[0],
                            model=model,
                            criterion=loss_function,
                            optimizer=optimizer,
-                           epoch=epoch,
-                           total_steps=epoch,
+                           epoch=i,
+                           total_steps=0,
                            print_freq=kwargs['print_freq'],
                            num_batches=1,
                            writer=None)
@@ -554,9 +564,12 @@ def train_mnli_meta(**kwargs):
         validate(val_loader=val_loader,
                  model=model,
                  criterion=loss_function,
-                 epoch=epoch,
+                 epoch=i,
                  print_freq=kwargs['print_freq'],
                  writer=None)
+
+        if i >= kwargs['k']:
+            break
 
 
 if __name__ == '__main__':
