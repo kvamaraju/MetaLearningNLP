@@ -6,3 +6,4 @@ six
 json_lines
 tensorboardX
 h5py
+tqdm

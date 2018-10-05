@@ -1,3 +1,4 @@
+from typing import Iterable
 import os
 import json_lines
 import zipfile
@@ -23,6 +24,22 @@ class MultiNLIDataset(Dataset):
 
     def __len__(self):
         return len(self.s1)
+
+
+class Batcher:
+    def __init__(self,
+                 loaders: Iterable,
+                 batch_size: int):
+        self._loaders = loaders
+        self._batch_size = batch_size
+
+    def __iter__(self):
+        batches = []
+        for batch in zip(*self._loaders):
+            batches.append(batch)
+            if len(batches) == self._batch_size:
+                yield list(map(list, zip(*batches)))
+                batches = []
 
 
 def tokenize(string):
