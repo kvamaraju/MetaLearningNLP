@@ -8,8 +8,8 @@ from torch.utils.data import DataLoader
 import torch.backends.cudnn as cudnn
 from tensorboardX import SummaryWriter
 
-from utils import AverageMeter, accuracy, set_directory, save_checkpoint, resume_from_checkpoint, construct_optimizer, construct_model
-from metalearning import ClassifierTask, MetaTrainWrapper
+from utils import AverageMeter, accuracy, set_directory, construct_optimizer, construct_model
+from metalearning import ClassifierTask, MetaTrainWrapper, zero_grad
 
 from datasets.mnli import *
 
@@ -50,7 +50,7 @@ def train_single_epoch(train_loader: Iterable,
         l2_var = torch.autograd.Variable(l2)
         target_var = torch.autograd.Variable(target)
 
-        optimizer.zero_grad()
+        zero_grad(optimizer)
 
         output = model(s1_var, s2_var, l1_var, l2_var)
         loss = criterion(output, target_var)
@@ -144,23 +144,20 @@ def cli():
 @click.option('--type', type=click.Choice(['mlp', 'transformer', 'lstm']), default='mlp')
 @click.option('--optim', type=click.Choice(['adam', 'adadelta', 'adagrad', 'adamax', 'rmsprop', 'rprop', 'sgd']), default='adam')
 @click.option('--lr', default=0.001, type=float)
-@click.option('--start_epoch', default=0, type=int)
 @click.option('--epochs', default=50, type=int)
-@click.option('--batch_size', default=200, type=int)
+@click.option('--batch-size', default=100, type=int)
 @click.option('--print_freq', default=100, type=int)
-@click.option('--save_at', type=list, default=[1, 10, 50, 100])
-@click.option('--resume', default='', type=str)
 @click.option('--device', type=int, default=0)
 def train_mnli(**kwargs):
     dir = set_directory(name=kwargs['type'], type_net=kwargs['type'])
     writer = SummaryWriter(dir)
 
-    train, dev_matched, vocab = prepare_mnli(root='datasets/data',
-                                             urls=['https://www.nyu.edu/projects/bowman/multinli/multinli_1.0.zip'],
-                                             dir='MultiNLI',
-                                             name='MultiNLI',
-                                             data_path='datasets/data/MultiNLI/multinli_1.0',
-                                             max_len=60)
+    train, dev_matched, dev_mismatched, vocab = prepare_mnli(root='datasets/data',
+                                                             urls=['https://www.nyu.edu/projects/bowman/multinli/multinli_1.0.zip'],
+                                                             dir='MultiNLI',
+                                                             name='MultiNLI',
+                                                             data_path='datasets/data/MultiNLI/multinli_1.0',
+                                                             max_len=60)
 
     weight_matrix = prepare_glove(glove_path="datasets/GloVe/glove.840B.300d.txt",
                                   vocab=vocab)
@@ -172,12 +169,12 @@ def train_mnli(**kwargs):
         num_workers=1,
         pin_memory=torch.cuda.is_available())
 
-    val_loader = DataLoader(
-        MultiNLIDataset(dataset=dev_matched),
+    val_loader = [DataLoader(
+        MultiNLIDataset(dataset=loader),
         batch_size=kwargs['batch_size'],
         shuffle=True,
         num_workers=1,
-        pin_memory=torch.cuda.is_available())
+        pin_memory=torch.cuda.is_available()) for loader in [dev_matched, dev_mismatched]]
 
     model = construct_model(model_type=kwargs['type'],
                             weight_matrix=weight_matrix)
@@ -198,17 +195,11 @@ def train_mnli(**kwargs):
                                     model=model,
                                     lr=kwargs['lr'])
 
-    if kwargs['resume'] != '':
-        kwargs['start_epoch'], best_prec1, total_steps, model, optimizer = resume_from_checkpoint(resume_path=kwargs['resume'],
-                                                                                                  model=model,
-                                                                                                  optimizer=optimizer)
-    else:
-        total_steps = 0
-        best_prec1 = 0.
+    total_steps = 0
 
     cudnn.benchmark = True
 
-    for epoch in range(kwargs['start_epoch'], kwargs['epochs']):
+    for epoch in tqdm(range(kwargs['epochs'])):
         total_steps = train_single_epoch(train_loader=train_loader,
                                          model=model,
                                          criterion=loss_function,
@@ -218,37 +209,13 @@ def train_mnli(**kwargs):
                                          print_freq=kwargs['print_freq'],
                                          writer=writer)
 
-        prec1 = validate(val_loader=val_loader,
-                         model=model,
-                         criterion=loss_function,
-                         epoch=epoch,
-                         print_freq=kwargs['print_freq'],
-                         writer=writer)
-
-        is_best = prec1 > best_prec1
-        if is_best:
-            best_prec1 = prec1
-        state = {
-            'epoch': epoch + 1,
-            'state_dict': model.state_dict(),
-            'best_prec1': max(prec1, best_prec1),
-            'optimizer': optimizer.state_dict(),
-            'total_steps': total_steps
-        }
-
-        if epoch in kwargs['save_at']:
-            name = f'checkpoint_{epoch}'
-            filename = f'checkpoint_{epoch}.pth.tar'
-        else:
-            name = 'checkpoint'
-            filename = 'checkpoint.pth.tar'
-
-        save_checkpoint(state=state,
-                        is_best=is_best,
-                        name=name,
-                        filename=filename)
-
-    print('Best accuracy: ', best_prec1)
+        for loader in val_loader:
+            validate(val_loader=loader,
+                     model=model,
+                     criterion=loss_function,
+                     epoch=epoch,
+                     print_freq=kwargs['print_freq'],
+                     writer=writer)
 
 
 @cli.command()
@@ -257,25 +224,22 @@ def train_mnli(**kwargs):
 @click.option('--k', default=5, type=int)
 @click.option('--lr', default=0.001, type=float)
 @click.option('--lr_kshot', default=0.0001, type=float)
-@click.option('--start_epoch', default=0, type=int)
 @click.option('--epochs', default=50, type=int)
-@click.option('--batch_size', default=100, type=int)
-@click.option('--print_freq', default=100, type=int)
-@click.option('--save_at', type=list, default=[1, 10, 50, 100])
-@click.option('--resume', default='', type=str)
+@click.option('--batch-size', default=100, type=int)
+@click.option('--print-freq', default=100, type=int)
 @click.option('--device', type=int, default=0)
 def train_mnli_kshot(**kwargs):
     dir = set_directory(name=kwargs['type'], type_net=kwargs['type'])
     writer = SummaryWriter(dir)
 
-    train, dev_matched_train, test, dev_matched_test, vocab = prepare_mnli_split(root='datasets/data',
-                                                                                 urls=['https://www.nyu.edu/projects/bowman/multinli/multinli_1.0.zip'],
-                                                                                 dir='MultiNLI',
-                                                                                 name='MultiNLI',
-                                                                                 data_path='datasets/data/MultiNLI/multinli_1.0',
-                                                                                 train_genres=[['fiction', 'government', 'telephone']],
-                                                                                 test_genres=[['slate', 'travel']],
-                                                                                 max_len=60)
+    train, dev_matched_train, dev_mismatched_train, test, dev_matched_test, dev_mismatched_test, vocab = prepare_mnli_split(root='datasets/data',
+                                                                                                                            urls=['https://www.nyu.edu/projects/bowman/multinli/multinli_1.0.zip'],
+                                                                                                                            dir='MultiNLI',
+                                                                                                                            name='MultiNLI',
+                                                                                                                            data_path='datasets/data/MultiNLI/multinli_1.0',
+                                                                                                                            train_genres=[['fiction', 'government', 'telephone']],
+                                                                                                                            test_genres=[['slate', 'travel']],
+                                                                                                                            max_len=60)
 
     weight_matrix = prepare_glove(glove_path="datasets/GloVe/glove.840B.300d.txt",
                                   vocab=vocab)
@@ -287,12 +251,12 @@ def train_mnli_kshot(**kwargs):
         num_workers=1,
         pin_memory=torch.cuda.is_available())
 
-    val_loader = DataLoader(
-        MultiNLIDataset(dataset=dev_matched_train[0]),
+    val_loader = [DataLoader(
+        MultiNLIDataset(dataset=dataset[0]),
         batch_size=kwargs['batch_size'],
         shuffle=True,
         num_workers=1,
-        pin_memory=torch.cuda.is_available())
+        pin_memory=torch.cuda.is_available()) for dataset in [dev_matched_train, dev_mismatched_train]]
 
     model = construct_model(model_type=kwargs['type'],
                             weight_matrix=weight_matrix)
@@ -313,17 +277,11 @@ def train_mnli_kshot(**kwargs):
                                     model=model,
                                     lr=kwargs['lr'])
 
-    if kwargs['resume'] != '':
-        kwargs['start_epoch'], best_prec1, total_steps, model, optimizer = resume_from_checkpoint(resume_path=kwargs['resume'],
-                                                                                                  model=model,
-                                                                                                  optimizer=optimizer)
-    else:
-        total_steps = 0
-        best_prec1 = 0.
-
     cudnn.benchmark = True
 
-    for epoch in range(kwargs['start_epoch'], kwargs['epochs']):
+    total_steps = 0
+
+    for epoch in tqdm(range(kwargs['epochs'])):
         total_steps = train_single_epoch(train_loader=train_loader,
                                          model=model,
                                          criterion=loss_function,
@@ -333,37 +291,13 @@ def train_mnli_kshot(**kwargs):
                                          print_freq=kwargs['print_freq'],
                                          writer=writer)
 
-        prec1 = validate(val_loader=val_loader,
-                         model=model,
-                         criterion=loss_function,
-                         epoch=epoch,
-                         print_freq=kwargs['print_freq'],
-                         writer=writer)
-
-        is_best = prec1 > best_prec1
-        if is_best:
-            best_prec1 = prec1
-        state = {
-            'epoch': epoch + 1,
-            'state_dict': model.state_dict(),
-            'best_prec1': max(prec1, best_prec1),
-            'optimizer': optimizer.state_dict(),
-            'total_steps': total_steps
-        }
-
-        if epoch in kwargs['save_at']:
-            name = f'checkpoint_{epoch}'
-            filename = f'checkpoint_{epoch}.pth.tar'
-        else:
-            name = 'checkpoint'
-            filename = 'checkpoint.pth.tar'
-
-        save_checkpoint(state=state,
-                        is_best=is_best,
-                        name=name,
-                        filename=filename)
-
-    print('Best accuracy: ', best_prec1)
+        for loader in val_loader:
+            validate(val_loader=loader,
+                     model=model,
+                     criterion=loss_function,
+                     epoch=epoch,
+                     print_freq=kwargs['print_freq'],
+                     writer=writer)
 
     print('Zero Shot Performance')
 
@@ -374,12 +308,12 @@ def train_mnli_kshot(**kwargs):
         num_workers=1,
         pin_memory=torch.cuda.is_available())
 
-    val_loader = DataLoader(
-        MultiNLIDataset(dataset=dev_matched_test[0]),
+    val_loader = [DataLoader(
+        MultiNLIDataset(dataset=dataset[0]),
         batch_size=kwargs['batch_size'],
         shuffle=True,
         num_workers=1,
-        pin_memory=torch.cuda.is_available())
+        pin_memory=torch.cuda.is_available()) for dataset in [dev_matched_test, dev_mismatched_test]]
 
     validate(val_loader=train_loader,
              model=model,
@@ -388,42 +322,44 @@ def train_mnli_kshot(**kwargs):
              print_freq=kwargs['print_freq'],
              writer=writer)
 
-    validate(val_loader=val_loader,
-             model=model,
-             criterion=loss_function,
-             epoch=epoch,
-             print_freq=kwargs['print_freq'],
-             writer=writer)
-
-    print(f"{kwargs['k']}-Shot Performance")
-
-    optimizer = construct_optimizer(optimizer=kwargs['optim'],
-                                    model=model,
-                                    lr=kwargs['lr_kshot'])
-
-    train_batcher = Batcher(loaders=[train_loader],
-                            batch_size=1)
-
-    for i, train_batch in enumerate(train_batcher):
-        train_single_epoch(train_loader=train_batch[0],
-                           model=model,
-                           criterion=loss_function,
-                           optimizer=optimizer,
-                           epoch=i,
-                           total_steps=0,
-                           print_freq=kwargs['print_freq'],
-                           num_batches=1,
-                           writer=writer)
-
-        validate(val_loader=val_loader,
+    for loader in val_loader:
+        validate(val_loader=loader,
                  model=model,
                  criterion=loss_function,
-                 epoch=i,
+                 epoch=epoch,
                  print_freq=kwargs['print_freq'],
                  writer=writer)
 
-        if i >= kwargs['k']:
-            break
+    if kwargs['k'] > 0:
+        print(f"{kwargs['k']}-Shot Performance")
+        optimizer = construct_optimizer(optimizer=kwargs['optim'],
+                                        model=model,
+                                        lr=kwargs['lr_kshot'])
+
+        train_batcher = Batcher(loaders=[train_loader],
+                                batch_size=1)
+
+        for i, train_batch in enumerate(train_batcher):
+            train_single_epoch(train_loader=train_batch[0],
+                               model=model,
+                               criterion=loss_function,
+                               optimizer=optimizer,
+                               epoch=i,
+                               total_steps=0,
+                               print_freq=kwargs['print_freq'],
+                               num_batches=1,
+                               writer=writer)
+
+            for loader in val_loader:
+                validate(val_loader=loader,
+                         model=model,
+                         criterion=loss_function,
+                         epoch=epoch,
+                         print_freq=kwargs['print_freq'],
+                         writer=writer)
+
+            if i >= kwargs['k']:
+                break
 
 
 @cli.command()
@@ -436,18 +372,18 @@ def train_mnli_kshot(**kwargs):
 @click.option('--num_inner_iterations', default=1, type=int)
 @click.option('--lr_kshot', default=0.001, type=float)
 @click.option('--epochs', default=20, type=int)
-@click.option('--batch_size', default=100, type=int)
-@click.option('--print_freq', default=100, type=int)
+@click.option('--batch-size', default=100, type=int)
+@click.option('--print-freq', default=100, type=int)
 @click.option('--device', type=int, default=0)
 def train_mnli_meta(**kwargs):
-    train, dev_matched_train, test, dev_matched_test, vocab = prepare_mnli_split(root='datasets/data',
-                                                                                 urls=['https://www.nyu.edu/projects/bowman/multinli/multinli_1.0.zip'],
-                                                                                 dir='MultiNLI',
-                                                                                 name='MultiNLI',
-                                                                                 data_path='datasets/data/MultiNLI/multinli_1.0',
-                                                                                 train_genres=[['fiction'], ['government'], ['telephone']],
-                                                                                 test_genres=[['slate', 'travel']],
-                                                                                 max_len=60)
+    train, dev_matched_train, dev_mismatched_train, test, dev_matched_test, dev_mismatched_test, vocab = prepare_mnli_split(root='datasets/data',
+                                                                                                                            urls=['https://www.nyu.edu/projects/bowman/multinli/multinli_1.0.zip'],
+                                                                                                                            dir='MultiNLI',
+                                                                                                                            name='MultiNLI',
+                                                                                                                            data_path='datasets/data/MultiNLI/multinli_1.0',
+                                                                                                                            train_genres=[['fiction'], ['government'], ['telephone']],
+                                                                                                                            test_genres=[['slate', 'travel']],
+                                                                                                                            max_len=60)
 
     weight_matrix = prepare_glove(glove_path="datasets/GloVe/glove.840B.300d.txt",
                                   vocab=vocab)
@@ -459,12 +395,19 @@ def train_mnli_meta(**kwargs):
         num_workers=1,
         pin_memory=torch.cuda.is_available()) for t in train]
 
-    val_loaders = [DataLoader(
-        MultiNLIDataset(dataset=t),
-        batch_size=2000,
-        shuffle=True,
-        num_workers=1,
-        pin_memory=torch.cuda.is_available()) for t in dev_matched_train]
+    val_matched_loaders = [DataLoader(
+                           MultiNLIDataset(dataset=t),
+                           batch_size=2000,
+                           shuffle=True,
+                           num_workers=1,
+                           pin_memory=torch.cuda.is_available()) for t in dev_matched_train]
+
+    val_mismatched_loaders = [DataLoader(
+                              MultiNLIDataset(dataset=t),
+                              batch_size=2000,
+                              shuffle=True,
+                              num_workers=1,
+                              pin_memory=torch.cuda.is_available()) for t in dev_mismatched_train]
 
     model = construct_model(model_type=kwargs['type'],
                             weight_matrix=weight_matrix)
@@ -503,13 +446,25 @@ def train_mnli_meta(**kwargs):
                        val_loaders=val_loaders)
 
         print(f'Epoch {epoch + 1} Validation')
-        for loader in val_loaders:
-            validate(val_loader=loader,
-                     model=model,
-                     criterion=loss_function,
-                     epoch=epoch,
-                     print_freq=kwargs['print_freq'],
-                     writer=None)
+        prec = []
+        for loader in val_matched_loaders:
+            prec.append(validate(val_loader=loader,
+                                 model=model,
+                                 criterion=loss_function,
+                                 epoch=epoch,
+                                 print_freq=kwargs['print_freq'],
+                                 writer=None))
+        print(f'Average Matched Precision is {np.mean(prec)}')
+
+        prec = []
+        for loader in val_mismatched_loaders:
+            prec.append(validate(val_loader=loader,
+                                 model=model,
+                                 criterion=loss_function,
+                                 epoch=epoch,
+                                 print_freq=kwargs['print_freq'],
+                                 writer=None))
+        print(f'Average Mismatched Precision is {np.mean(prec)}')
 
     train_loader = DataLoader(
         MultiNLIDataset(dataset=test[0]),
@@ -518,8 +473,15 @@ def train_mnli_meta(**kwargs):
         num_workers=1,
         pin_memory=torch.cuda.is_available())
 
-    val_loader = DataLoader(
+    val_matched_loader = DataLoader(
         MultiNLIDataset(dataset=dev_matched_test[0]),
+        batch_size=kwargs['batch_size'],
+        shuffle=True,
+        num_workers=1,
+        pin_memory=torch.cuda.is_available())
+
+    val_mismatched_loader = DataLoader(
+        MultiNLIDataset(dataset=dev_mismatched_test[0]),
         batch_size=kwargs['batch_size'],
         shuffle=True,
         num_workers=1,
@@ -534,42 +496,56 @@ def train_mnli_meta(**kwargs):
              print_freq=kwargs['print_freq'],
              writer=None)
 
-    validate(val_loader=val_loader,
+    validate(val_loader=val_matched_loader,
              model=model,
              criterion=loss_function,
              epoch=0,
              print_freq=kwargs['print_freq'],
              writer=None)
 
-    print(f"{kwargs['k']}-Shot Performance")
+    validate(val_loader=val_mismatched_loader,
+             model=model,
+             criterion=loss_function,
+             epoch=0,
+             print_freq=kwargs['print_freq'],
+             writer=None)
 
-    optimizer = construct_optimizer(optimizer=kwargs['optim'],
-                                    model=model,
-                                    lr=kwargs['lr_kshot'])
+    if kwargs['k'] > 0:
+        print(f"{kwargs['k']}-Shot Performance")
+        optimizer = construct_optimizer(optimizer=kwargs['optim'],
+                                        model=model,
+                                        lr=kwargs['lr_kshot'])
 
-    train_batcher = Batcher(loaders=[train_loader],
-                            batch_size=1)
+        train_batcher = Batcher(loaders=[train_loader],
+                                batch_size=1)
 
-    for i, train_batch in enumerate(train_batcher):
-        train_single_epoch(train_loader=train_batch[0],
-                           model=model,
-                           criterion=loss_function,
-                           optimizer=optimizer,
-                           epoch=i,
-                           total_steps=0,
-                           print_freq=kwargs['print_freq'],
-                           num_batches=1,
-                           writer=None)
+        for i, train_batch in enumerate(train_batcher):
+            train_single_epoch(train_loader=train_batch[0],
+                               model=model,
+                               criterion=loss_function,
+                               optimizer=optimizer,
+                               epoch=i,
+                               total_steps=0,
+                               print_freq=kwargs['print_freq'],
+                               num_batches=1,
+                               writer=None)
 
-        validate(val_loader=val_loader,
-                 model=model,
-                 criterion=loss_function,
-                 epoch=i,
-                 print_freq=kwargs['print_freq'],
-                 writer=None)
+            validate(val_loader=val_matched_loader,
+                     model=model,
+                     criterion=loss_function,
+                     epoch=0,
+                     print_freq=kwargs['print_freq'],
+                     writer=None)
 
-        if i >= kwargs['k']:
-            break
+            validate(val_loader=val_mismatched_loader,
+                     model=model,
+                     criterion=loss_function,
+                     epoch=0,
+                     print_freq=kwargs['print_freq'],
+                     writer=None)
+
+            if i >= kwargs['k']:
+                break
 
 
 if __name__ == '__main__':

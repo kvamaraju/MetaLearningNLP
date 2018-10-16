@@ -178,7 +178,7 @@ def prepare_mnli(root: str,
                  dir: str,
                  name: str,
                  data_path: str,
-                 max_len: int = None) -> (dict, dict, dict):
+                 max_len: int = None) -> (dict, dict, dict, dict):
 
     prefix = 'multinli_1.0_'
     suffix = '.jsonl'
@@ -205,7 +205,13 @@ def prepare_mnli(root: str,
                                dataset='dev_matched',
                                genres=genres)
 
-    datasets = train['s1'] + train['s2'] + dev_matched['s1'] + dev_matched['s2']
+    dev_mismatched = get_multinli(data_path=data_path,
+                               prefix=prefix,
+                               suffix=suffix,
+                               dataset='dev_mismatched',
+                               genres=genres)
+
+    datasets = train['s1'] + train['s2'] + dev_matched['s1'] + dev_matched['s2'] + dev_mismatched['s1'] + dev_mismatched['s2']
 
     vocab, max_len = build_vocab(sentences=datasets,
                                  max_len=max_len)
@@ -218,7 +224,11 @@ def prepare_mnli(root: str,
                                  vocab=vocab,
                                  max_len=max_len)
 
-    return train, dev_matched, vocab
+    dev_mismatched = format_dataset(dataset=dev_mismatched,
+                                    vocab=vocab,
+                                    max_len=max_len)
+
+    return train, dev_matched, dev_mismatched, vocab
 
 
 def prepare_mnli_split(root: str,
@@ -228,7 +238,7 @@ def prepare_mnli_split(root: str,
                        data_path: str,
                        train_genres: list,
                        test_genres: list,
-                       max_len: int = None) -> (list, list, list, list, dict):
+                       max_len: int = None) -> (list, list, list, list, list, list, dict):
 
     prefix = 'multinli_1.0_'
     suffix = '.jsonl'
@@ -240,6 +250,7 @@ def prepare_mnli_split(root: str,
 
     train = []
     dev_matched_train = []
+    dev_mismatched_train = []
     for genres in train_genres:
         train.append(get_multinli(data_path=data_path,
                                   prefix=prefix,
@@ -252,23 +263,34 @@ def prepare_mnli_split(root: str,
                                               suffix=suffix,
                                               dataset='dev_matched',
                                               genres=genres))
+        dev_mismatched_train.append(get_multinli(data_path=data_path,
+                                                 prefix=prefix,
+                                                 suffix=suffix,
+                                                 dataset='dev_mismatched',
+                                                 genres=genres))
+
     test = []
     dev_matched_test = []
+    dev_mismatched_test = []
     for genres in test_genres:
         test.append(get_multinli(data_path=data_path,
                                  prefix=prefix,
                                  suffix=suffix,
                                  dataset='train',
                                  genres=genres))
-
         dev_matched_test.append(get_multinli(data_path=data_path,
                                              prefix=prefix,
                                              suffix=suffix,
                                              dataset='dev_matched',
                                              genres=genres))
+        dev_mismatched_test.append(get_multinli(data_path=data_path,
+                                                prefix=prefix,
+                                                suffix=suffix,
+                                                dataset='dev_mismatched',
+                                                genres=genres))
 
     datasets = []
-    for t in train + dev_matched_train + test + dev_matched_test:
+    for t in train + dev_matched_train + dev_matched_train + test + dev_matched_test + dev_mismatched_test:
         datasets += t['s1'] + t['s2']
 
     vocab, max_len = build_vocab(sentences=datasets,
@@ -282,6 +304,10 @@ def prepare_mnli_split(root: str,
                                         vocab=vocab,
                                         max_len=max_len) for dataset in dev_matched_train]
 
+    dev_mismatched_train = [format_dataset(dataset=dataset,
+                                           vocab=vocab,
+                                           max_len=max_len) for dataset in dev_mismatched_train]
+
     test = [format_dataset(dataset=dataset,
                            vocab=vocab,
                            max_len=max_len) for dataset in test]
@@ -290,4 +316,8 @@ def prepare_mnli_split(root: str,
                                        vocab=vocab,
                                        max_len=max_len) for dataset in dev_matched_test]
 
-    return train, dev_matched_train, test, dev_matched_test, vocab
+    dev_mismatched_test = [format_dataset(dataset=dataset,
+                                          vocab=vocab,
+                                          max_len=max_len) for dataset in dev_mismatched_test]
+
+    return train, dev_matched_train, dev_mismatched_train, test, dev_matched_test, dev_mismatched_test, vocab

@@ -56,8 +56,7 @@ class GradientTaskModule(nn.Module):
                          inputs=input_batch)
         if compute_grad:
             return torch.autograd.grad(criterion / gradient_average, params_for_grad,
-                                       create_graph=create_graph,
-                                       allow_unused=True)
+                                       create_graph=create_graph)
 
 
 class MAML(nn.Module):
@@ -168,15 +167,11 @@ class Reptile(nn.Module):
                 train_batch: list,
                 val_loaders: list):
 
-        meta_param_dict = param_dict(self.module, clone=True)
-
         assert len(tasks) == len(train_batch)
 
         i = np.random.choice(range(len(tasks)))
 
-        load_param_dict(self.module, meta_param_dict)
         params_for_grad = get_params_for_grad(self.module)
-
         new_params = self.inner_loop(task=tasks[i],
                                      loader=train_batch[i],
                                      params_for_grad=params_for_grad)
@@ -255,6 +250,7 @@ class MetaTrainWrapper(nn.Module):
                 if p.grad is not None:
                     p.grad = p.grad.data.contiguous()
         self.optim.zero_grad()
+
         if self.training:
             self.meta_module(tasks=tasks,
                              train_batch=train_batch,
@@ -319,8 +315,8 @@ def load_param_dict(module: torch.nn.Module,
                 own_state[name].copy_(param)
             except Exception:
                 raise RuntimeError(f'While copying the parameter named {name}, '
-                                   'whose dimensions in the model are {own_state[name].size()} and '
-                                   'whose dimensions in the checkpoint are {param.size()}.')
+                                   f'whose dimensions in the model are {own_state[name].size()} and '
+                                   f'whose dimensions in the checkpoint are {param.size()}.')
         elif strict:
             raise KeyError(f'unexpected key "{name}" in state_dict')
     if strict:
@@ -446,3 +442,10 @@ def set_params_with_grad(module: torch.nn.Module,
             param = params[j]
             j += 1
 
+
+def zero_grad(optimizer: torch.optim.Optimizer):
+    for group in optimizer.param_groups:
+        for p in group['params']:
+            if p.grad is not None:
+                p.grad = p.grad.detach()
+                p.grad.zero_()
