@@ -223,7 +223,7 @@ def train_mnli(**kwargs):
 @click.option('--optim', type=click.Choice(['adam', 'adadelta', 'adagrad', 'adamax', 'rmsprop', 'rprop', 'sgd']), default='adam')
 @click.option('--k', default=5, type=int)
 @click.option('--lr', default=0.001, type=float)
-@click.option('--lr_kshot', default=0.0001, type=float)
+@click.option('--lr-kshot', default=0.0001, type=float)
 @click.option('--epochs', default=50, type=int)
 @click.option('--batch-size', default=100, type=int)
 @click.option('--print-freq', default=100, type=int)
@@ -232,14 +232,14 @@ def train_mnli_kshot(**kwargs):
     dir = set_directory(name=kwargs['type'], type_net=kwargs['type'])
     writer = SummaryWriter(dir)
 
-    train, dev_matched_train, dev_mismatched_train, test, dev_matched_test, dev_mismatched_test, vocab = prepare_mnli_split(root='datasets/data',
-                                                                                                                            urls=['https://www.nyu.edu/projects/bowman/multinli/multinli_1.0.zip'],
-                                                                                                                            dir='MultiNLI',
-                                                                                                                            name='MultiNLI',
-                                                                                                                            data_path='datasets/data/MultiNLI/multinli_1.0',
-                                                                                                                            train_genres=[['fiction', 'government', 'telephone']],
-                                                                                                                            test_genres=[['slate', 'travel']],
-                                                                                                                            max_len=60)
+    train, dev_matched_train, test, dev_matched_test, dev_mismatched_test, vocab = prepare_mnli_split(root='datasets/data',
+                                                                                                      urls=['https://www.nyu.edu/projects/bowman/multinli/multinli_1.0.zip'],
+                                                                                                      dir='MultiNLI',
+                                                                                                      name='MultiNLI',
+                                                                                                      data_path='datasets/data/MultiNLI/multinli_1.0',
+                                                                                                      train_genres=[['fiction', 'government', 'telephone']],
+                                                                                                      test_genres=[['slate', 'travel']],
+                                                                                                      max_len=60)
 
     weight_matrix = prepare_glove(glove_path="datasets/GloVe/glove.840B.300d.txt",
                                   vocab=vocab)
@@ -251,12 +251,12 @@ def train_mnli_kshot(**kwargs):
         num_workers=1,
         pin_memory=torch.cuda.is_available())
 
-    val_loader = [DataLoader(
-        MultiNLIDataset(dataset=dataset[0]),
+    val_loader = DataLoader(
+        MultiNLIDataset(dataset=dev_matched_train[0]),
         batch_size=kwargs['batch_size'],
         shuffle=True,
         num_workers=1,
-        pin_memory=torch.cuda.is_available()) for dataset in [dev_matched_train, dev_mismatched_train]]
+        pin_memory=torch.cuda.is_available())
 
     model = construct_model(model_type=kwargs['type'],
                             weight_matrix=weight_matrix)
@@ -291,13 +291,12 @@ def train_mnli_kshot(**kwargs):
                                          print_freq=kwargs['print_freq'],
                                          writer=writer)
 
-        for loader in val_loader:
-            validate(val_loader=loader,
-                     model=model,
-                     criterion=loss_function,
-                     epoch=epoch,
-                     print_freq=kwargs['print_freq'],
-                     writer=writer)
+        validate(val_loader=val_loader,
+                 model=model,
+                 criterion=loss_function,
+                 epoch=epoch,
+                 print_freq=kwargs['print_freq'],
+                 writer=writer)
 
     print('Zero Shot Performance')
 
@@ -365,25 +364,25 @@ def train_mnli_kshot(**kwargs):
 @cli.command()
 @click.option('--type', type=click.Choice(['mlp', 'transformer', 'lstm']), default='mlp')
 @click.option('--optim', type=click.Choice(['adam', 'adadelta', 'adagrad', 'adamax', 'rmsprop', 'rprop', 'sgd']), default='adam')
-@click.option('--use_maml', type=bool, default=True)
+@click.option('--use-maml', type=bool, default=True)
 @click.option('--k', default=5, type=int)
-@click.option('--lr_inner_meta', default=0.001, type=float)
-@click.option('--lr_outer_meta', default=0.001, type=float)
-@click.option('--num_inner_iterations', default=1, type=int)
-@click.option('--lr_kshot', default=0.001, type=float)
+@click.option('--lr-inner-meta', default=0.001, type=float)
+@click.option('--lr-outer-meta', default=0.001, type=float)
+@click.option('--num-inner-iterations', default=1, type=int)
+@click.option('--lr-kshot', default=0.001, type=float)
 @click.option('--epochs', default=20, type=int)
 @click.option('--batch-size', default=100, type=int)
 @click.option('--print-freq', default=100, type=int)
 @click.option('--device', type=int, default=0)
 def train_mnli_meta(**kwargs):
-    train, dev_matched_train, dev_mismatched_train, test, dev_matched_test, dev_mismatched_test, vocab = prepare_mnli_split(root='datasets/data',
-                                                                                                                            urls=['https://www.nyu.edu/projects/bowman/multinli/multinli_1.0.zip'],
-                                                                                                                            dir='MultiNLI',
-                                                                                                                            name='MultiNLI',
-                                                                                                                            data_path='datasets/data/MultiNLI/multinli_1.0',
-                                                                                                                            train_genres=[['fiction'], ['government'], ['telephone']],
-                                                                                                                            test_genres=[['slate', 'travel']],
-                                                                                                                            max_len=60)
+    train, dev_matched_train, test, dev_matched_test, dev_mismatched_test, vocab = prepare_mnli_split(root='datasets/data',
+                                                                                                      urls=['https://www.nyu.edu/projects/bowman/multinli/multinli_1.0.zip'],
+                                                                                                      dir='MultiNLI',
+                                                                                                      name='MultiNLI',
+                                                                                                      data_path='datasets/data/MultiNLI/multinli_1.0',
+                                                                                                      train_genres=[['fiction'], ['government'], ['telephone']],
+                                                                                                      test_genres=[['slate', 'travel']],
+                                                                                                      max_len=60)
 
     weight_matrix = prepare_glove(glove_path="datasets/GloVe/glove.840B.300d.txt",
                                   vocab=vocab)
@@ -401,13 +400,6 @@ def train_mnli_meta(**kwargs):
                            shuffle=True,
                            num_workers=1,
                            pin_memory=torch.cuda.is_available()) for t in dev_matched_train]
-
-    val_mismatched_loaders = [DataLoader(
-                              MultiNLIDataset(dataset=t),
-                              batch_size=2000,
-                              shuffle=True,
-                              num_workers=1,
-                              pin_memory=torch.cuda.is_available()) for t in dev_mismatched_train]
 
     model = construct_model(model_type=kwargs['type'],
                             weight_matrix=weight_matrix)
@@ -443,7 +435,7 @@ def train_mnli_meta(**kwargs):
         for train_batch in tqdm(train_batcher):
             meta_model(tasks=[ClassifierTask() for _ in range(len(train_loaders))],
                        train_batch=train_batch,
-                       val_loaders=val_loaders)
+                       val_loaders=val_matched_loaders)
 
         print(f'Epoch {epoch + 1} Validation')
         prec = []
@@ -455,16 +447,6 @@ def train_mnli_meta(**kwargs):
                                  print_freq=kwargs['print_freq'],
                                  writer=None))
         print(f'Average Matched Precision is {np.mean(prec)}')
-
-        prec = []
-        for loader in val_mismatched_loaders:
-            prec.append(validate(val_loader=loader,
-                                 model=model,
-                                 criterion=loss_function,
-                                 epoch=epoch,
-                                 print_freq=kwargs['print_freq'],
-                                 writer=None))
-        print(f'Average Mismatched Precision is {np.mean(prec)}')
 
     train_loader = DataLoader(
         MultiNLIDataset(dataset=test[0]),
