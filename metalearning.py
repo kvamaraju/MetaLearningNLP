@@ -101,6 +101,8 @@ class MAML(nn.Module):
             update_grad_dict(module=self.module,
                              grad_state_dict=meta_grad_dict)
 
+        load_grad_dict(self.module, meta_grad_dict)
+
         if self.distributed:
             reduce_gradients(self.module)
 
@@ -117,12 +119,14 @@ class MAML(nn.Module):
                                            input_batch=input_batch,
                                            params_for_grad=params_for_grad,
                                            create_graph=self.second_order and self.training)
+
                 new_params = grad_step_params(params=params_for_grad,
                                               grads=grads,
                                               lr=self.inner_lr,
                                               inplace=False)
-            set_params_with_grad(module=self.module,
-                                 params=new_params)
+
+                set_params_with_grad(module=self.module,
+                                     params=new_params)
         self.module.train(training_status)
 
     def outer_loop(self,
@@ -437,7 +441,7 @@ def get_params_for_grad(module: torch.nn.Module,
 def set_params_with_grad(module: torch.nn.Module,
                          params: list):
     j = 0
-    for _, (_, param) in enumerate(module.named_parameters()):
+    for _, param in module.named_parameters():
         if param is not None and param.requires_grad:
             param = params[j]
             j += 1
