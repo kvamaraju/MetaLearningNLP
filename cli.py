@@ -141,7 +141,7 @@ def cli():
 
 
 @cli.command()
-@click.option('--type', type=click.Choice(['mlp', 'transformer', 'lstm']), default='mlp')
+@click.option('--type', type=click.Choice(['mlp', 'transformer', 'transformer2', 'lstm']), default='mlp')
 @click.option('--optim', type=click.Choice(['adam', 'adadelta', 'adagrad', 'adamax', 'rmsprop', 'rprop', 'sgd']), default='adam')
 @click.option('--lr', default=0.001, type=float)
 @click.option('--epochs', default=50, type=int)
@@ -167,6 +167,7 @@ def train_mnli(**kwargs):
         batch_size=kwargs['batch_size'],
         shuffle=True,
         num_workers=1,
+        drop_last=True,
         pin_memory=torch.cuda.is_available())
 
     val_loader = [DataLoader(
@@ -174,6 +175,7 @@ def train_mnli(**kwargs):
         batch_size=kwargs['batch_size'],
         shuffle=True,
         num_workers=1,
+        drop_last=True,
         pin_memory=torch.cuda.is_available()) for loader in [dev_matched, dev_mismatched]]
 
     model = construct_model(model_type=kwargs['type'],
@@ -249,6 +251,7 @@ def train_mnli_kshot(**kwargs):
         batch_size=kwargs['batch_size'],
         shuffle=True,
         num_workers=1,
+        drop_last=True,
         pin_memory=torch.cuda.is_available())
 
     val_loader = DataLoader(
@@ -256,6 +259,7 @@ def train_mnli_kshot(**kwargs):
         batch_size=kwargs['batch_size'],
         shuffle=True,
         num_workers=1,
+        drop_last=True,
         pin_memory=torch.cuda.is_available())
 
     model = construct_model(model_type=kwargs['type'],
@@ -305,6 +309,7 @@ def train_mnli_kshot(**kwargs):
         batch_size=kwargs['batch_size'],
         shuffle=True,
         num_workers=1,
+        drop_last=True,
         pin_memory=torch.cuda.is_available())
 
     val_loader = [DataLoader(
@@ -312,6 +317,7 @@ def train_mnli_kshot(**kwargs):
         batch_size=kwargs['batch_size'],
         shuffle=True,
         num_workers=1,
+        drop_last=True,
         pin_memory=torch.cuda.is_available()) for dataset in [dev_matched_test, dev_mismatched_test]]
 
     validate(val_loader=train_loader,
@@ -392,6 +398,7 @@ def train_mnli_meta(**kwargs):
         batch_size=kwargs['batch_size'],
         shuffle=True,
         num_workers=1,
+        drop_last=True,
         pin_memory=torch.cuda.is_available()) for t in train]
 
     val_matched_loaders = [DataLoader(
@@ -399,6 +406,7 @@ def train_mnli_meta(**kwargs):
                            batch_size=2000,
                            shuffle=True,
                            num_workers=1,
+                           drop_last=True,
                            pin_memory=torch.cuda.is_available()) for t in dev_matched_train]
 
     model = construct_model(model_type=kwargs['type'],
@@ -426,7 +434,8 @@ def train_mnli_meta(**kwargs):
                                   inner_lr=kwargs['lr_inner_meta'],
                                   use_maml=kwargs['use_maml'],
                                   optim=optimizer,
-                                  second_order=True)
+                                  second_order=True,
+                                  sample_task=True)
 
     train_batcher = Batcher(loaders=train_loaders,
                             batch_size=kwargs['num_inner_iterations'])
@@ -435,7 +444,7 @@ def train_mnli_meta(**kwargs):
         for train_batch in tqdm(train_batcher):
             meta_model(tasks=[ClassifierTask() for _ in range(len(train_loaders))],
                        train_batch=train_batch,
-                       val_loaders=val_matched_loaders)
+                       val_loaders=train_loaders)
 
         print(f'Epoch {epoch + 1} Validation')
         prec = []
@@ -453,6 +462,7 @@ def train_mnli_meta(**kwargs):
         batch_size=kwargs['batch_size'],
         shuffle=True,
         num_workers=1,
+        drop_last=True,
         pin_memory=torch.cuda.is_available())
 
     val_matched_loader = DataLoader(
@@ -460,6 +470,7 @@ def train_mnli_meta(**kwargs):
         batch_size=kwargs['batch_size'],
         shuffle=True,
         num_workers=1,
+        drop_last=True,
         pin_memory=torch.cuda.is_available())
 
     val_mismatched_loader = DataLoader(
@@ -467,6 +478,7 @@ def train_mnli_meta(**kwargs):
         batch_size=kwargs['batch_size'],
         shuffle=True,
         num_workers=1,
+        drop_last=True,
         pin_memory=torch.cuda.is_available())
 
     print('Zero Shot Performance')

@@ -108,9 +108,9 @@ def build_vocab(sentences: list,
                 vocab[word] = i
                 i += 1
 
-    vocab['<s>'] = j
-    vocab['</s>'] = j + 1
-    vocab['<p>'] = j + 2
+    vocab['<s>'] = i
+    vocab['</s>'] = i + 1
+    vocab['<p>'] = i + 2
     return vocab, l
 
 

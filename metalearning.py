@@ -153,12 +153,12 @@ class Reptile(nn.Module):
     def __init__(self,
                  module: torch.nn.Module,
                  inner_lr: float,
-                 second_order: bool = False,
+                 sample_task: bool = True,
                  distributed: bool = False):
         super(Reptile, self).__init__()
         self.module = module
         self.inner_lr = inner_lr
-        self.second_order = second_order
+        self.sample_task = sample_task
         self.gradient_task = GradientTaskModule()
         self.distributed = distributed
         if self.distributed:
@@ -172,15 +172,33 @@ class Reptile(nn.Module):
                 val_loaders: list):
 
         assert len(tasks) == len(train_batch)
+        num_tasks = len(tasks)
 
-        i = np.random.choice(range(len(tasks)))
+        if self.sample_task:
+            i = np.random.choice(range(num_tasks))
 
-        params_for_grad = get_params_for_grad(self.module)
-        new_params = self.inner_loop(task=tasks[i],
-                                     loader=train_batch[i],
-                                     params_for_grad=params_for_grad)
+            params_for_grad = get_params_for_grad(self.module)
+            new_params = self.inner_loop(task=tasks[i],
+                                         loader=train_batch[i],
+                                         params_for_grad=params_for_grad)
 
-        grads = [x - y for x, y in zip(params_for_grad, new_params)]
+            grads = [x - y for x, y in zip(params_for_grad, new_params)]
+        else:
+            grads = [torch.zeros_like(g) for g in get_params_for_grad(self.module)]
+            meta_param_dict = param_dict(self.module, clone=True)
+
+            for i, _ in enumerate(train_batch):
+                load_param_dict(self.module, meta_param_dict)
+                params_for_grad = get_params_for_grad(self.module)
+
+                new_params = self.inner_loop(task=tasks[i],
+                                             loader=train_batch[i],
+                                             params_for_grad=params_for_grad)
+
+                grads = [z + x - y for x, y, z in zip(params_for_grad, new_params, grads)]
+
+            grads = [g.div(num_tasks) for g in grads]
+            params_for_grad = get_params_for_grad(self.module)
 
         set_grads_for_params(params=params_for_grad, grads=grads)
 
@@ -201,12 +219,12 @@ class Reptile(nn.Module):
                                            module=self.module,
                                            input_batch=input_batch,
                                            params_for_grad=params_for_grad,
-                                           create_graph=self.second_order and self.training)
+                                           create_graph=False)
                 new_params = grad_step_params(params=params_for_grad,
                                               grads=grads,
                                               lr=self.inner_lr,
                                               inplace=False)
-            set_params_with_grad(module=self.module,
+                set_params_with_grad(module=self.module,
                                  params=new_params)
         self.module.train(training_status)
         return new_params
@@ -219,6 +237,7 @@ class MetaTrainWrapper(nn.Module):
                  use_maml: bool = True,
                  optim: torch.optim.Optimizer = None,
                  second_order: bool = False,
+                 sample_task: bool = True,
                  distributed: bool = False,
                  world_size: int = 1,
                  rank: int = -1):
@@ -235,7 +254,7 @@ class MetaTrainWrapper(nn.Module):
         else:
             self.meta_module = Reptile(module=self.module,
                                        inner_lr=inner_lr,
-                                       second_order=second_order)
+                                       sample_task=sample_task)
 
     def train(self, mode=True):
         assert self.optim is not None
