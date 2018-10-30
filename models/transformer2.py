@@ -13,6 +13,10 @@ def gelu(x):
     return 0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
 
 
+def swish(x):
+    return 1.78718727865 * (x * torch.sigmoid(x) - 0.20662096414)
+
+
 class LayerNorm(nn.Module):
     def __init__(self, n_state, e=1e-5):
         super(LayerNorm, self).__init__()
