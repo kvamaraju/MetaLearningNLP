@@ -5,9 +5,11 @@ import torch
 import numpy as np
 
 from models.mlp import MLP
+from models.mlp_r import MLPR
 from models.transformer import Transformer
-from models.transformer2 import Transformer2
+from models.transformer_r import TransformerR
 from models.bilstm import ResBiLSTM
+from models.bilstm_r import ResBiLSTMR
 
 
 class AverageMeter(object):
@@ -109,14 +111,25 @@ def construct_model(model_type: str,
     elif model_type == 'transformer':
         model = Transformer(num_embeddings=weight_matrix.shape[0],
                             embedding_matrix=weight_matrix)
-    elif model_type == 'transformer2':
-        model = Transformer2(num_embeddings=weight_matrix.shape[0],
-                             embedding_dim=weight_matrix.shape[1],
-                             embedding_matrix=weight_matrix,
-                             clf_token=weight_matrix.shape[0]-3)
     elif model_type == 'lstm':
         model = ResBiLSTM(num_embeddings=weight_matrix.shape[0],
                           embedding_matrix=weight_matrix)
+    else:
+        model = None
+    return model
+
+
+def construct_model_r(model_type: str,
+                      weight_matrix: np.ndarray) -> torch.nn.Module:
+    if model_type == 'mlp':
+        model = MLPR(num_embeddings=weight_matrix.shape[0],
+                     embedding_matrix=weight_matrix)
+    elif model_type == 'transformer':
+        model = TransformerR(num_embeddings=weight_matrix.shape[0],
+                             embedding_matrix=weight_matrix)
+    elif model_type == 'lstm':
+        model = ResBiLSTMR(num_embeddings=weight_matrix.shape[0],
+                           embedding_matrix=weight_matrix)
     else:
         model = None
     return model

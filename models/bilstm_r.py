@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 
+from functions.gradientreversal import GradientReversalFunction
+
 from copy import deepcopy
 
 import numpy as np
@@ -11,7 +13,7 @@ import numpy as np
 # Based on "Shortcut-Stacked Sentence Encoders for Multi-Domain Inference"
 # (https://arxiv.org/abs/1708.02312)
 # (https://github.com/easonnie/ResEncoder/blob/master/model/res_encoder.py)
-class ResBiLSTM(nn.Module):
+class ResBiLSTMR(nn.Module):
     def __init__(self,
                  embedding_matrix: np.ndarray = None,
                  num_embeddings: int = 196245,
@@ -20,7 +22,7 @@ class ResBiLSTM(nn.Module):
                  mlp_dim: int = 800,
                  dropout_prob: float = 0.1,
                  max_sequence_len: int = 60):
-        super(ResBiLSTM, self).__init__()
+        super(ResBiLSTMR, self).__init__()
 
         self.embedding_layer = nn.Embedding(num_embeddings, embedding_dim)
         if embedding_matrix is not None:
@@ -39,13 +41,12 @@ class ResBiLSTM(nn.Module):
         self.max_sequence_len = max_sequence_len
 
         self.mlp_1 = nn.Linear(hidden_dim[2] * 2 * 4, mlp_dim)
-        self.mlp_2 = nn.Linear(mlp_dim, mlp_dim)
         self.final_layer = nn.Linear(mlp_dim, 3)
+        self.domain_layer = nn.Linear(mlp_dim, 2)
 
         self.classifier = nn.Sequential(*[self.mlp_1,
                                           nn.ReLU(),
-                                          nn.Dropout(dropout_prob),
-                                          self.final_layer])
+                                          nn.Dropout(dropout_prob)])
 
     @staticmethod
     def pack_for_rnn_seq(inputs: torch.Tensor,
@@ -101,14 +102,15 @@ class ResBiLSTM(nn.Module):
         state_shape = lstm.num_layers * 2, batch_size, lstm.hidden_size
         h0 = c0 = Variable(seqs.data.new(*state_shape).zero_())
         packed_pinputs, r_index = self.pack_for_rnn_seq(seqs, lengths)
-        output, _ = lstm(packed_pinputs, (h0, c0))
+        output, _= lstm(packed_pinputs, (h0, c0))
         return self.unpack_from_rnn_seq(output, r_index)
 
     def forward(self,
                 s1: torch.Tensor,
                 s2: torch.Tensor,
                 l1: torch.Tensor,
-                l2: torch.Tensor) -> torch.Tensor:
+                l2: torch.Tensor,
+                alpha: np.float32 = -1.0) -> (torch.Tensor, torch.Tensor):
         if self.max_sequence_len:
             if isinstance(l1, int):
                 l1 = torch.from_numpy(np.array([l1 for _ in range(s1.shape[0])], dtype=int))
@@ -151,7 +153,10 @@ class ResBiLSTM(nn.Module):
                               s2_layer3_maxout,
                               torch.abs(s1_layer3_maxout - s2_layer3_maxout),
                               s1_layer3_maxout * s2_layer3_maxout], dim=1)
-        return self.classifier(features)
+
+        classifier = self.classifier(features)
+
+        return self.final_layer(classifier), self.domain_layer(GradientReversalFunction.apply(classifier, alpha))
 
     def load_params(self,
                     params: list):
