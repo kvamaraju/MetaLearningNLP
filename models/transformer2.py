@@ -4,20 +4,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from functions.gradientreversal import GradientReversalFunction
-
 from copy import deepcopy
 
 
 # Based on "A Decomposable Attention Model for Natural Language Inference" (https://arxiv.org/abs/1606.01933)
-class TransformerR(nn.Module):
+class Transformer2(nn.Module):
     def __init__(self,
                  embedding_matrix: np.ndarray = None,
                  num_classes: int = 3,
                  num_embeddings: int = 196245,
                  embedding_dim: int = 300,
-                 hidden_dim: int = 200):
-        super(TransformerR, self).__init__()
+                 hidden_dim: int = 200,
+                 num_genres: int = 4):
+        super(Transformer2, self).__init__()
 
         self.num_classes = num_classes
         self.num_embeddings = num_embeddings
@@ -35,7 +34,7 @@ class TransformerR(nn.Module):
         self.mlp_g = self._mlp_layers(input_dim=2 * self.hidden_dim, output_dim=self.hidden_dim)
         self.mlp_h = self._mlp_layers(input_dim=2 * self.hidden_dim, output_dim=self.hidden_dim)
         self.final_linear = nn.Linear(self.hidden_dim, self.num_classes)
-        self.domain_layer = nn.Linear(self.hidden_dim, 2)
+        self.domain_layer = nn.Linear(self.hidden_dim, num_genres)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -60,8 +59,7 @@ class TransformerR(nn.Module):
                 s1: torch.Tensor,
                 s2: torch.Tensor,
                 l1: torch.Tensor,
-                l2: torch.Tensor,
-                alpha: np.float32 = -1.0):
+                l2: torch.Tensor):
         s1_ = self.input_layer(self.embedding_layer(s1))
         s2_ = self.input_layer(self.embedding_layer(s2))
 
@@ -84,7 +82,7 @@ class TransformerR(nn.Module):
         s2_out = g2_.sum(1).squeeze(1)
 
         h = self.mlp_h(torch.cat((s1_out, s2_out), 1))
-        return self.final_linear(h), self.domain_layer(GradientReversalFunction.apply(h, alpha))
+        return self.final_linear(h), self.domain_layer(h)
 
     def load_params(self, params):
         for p, avg_p in zip(self.parameters(), params):

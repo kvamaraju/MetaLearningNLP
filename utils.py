@@ -5,11 +5,11 @@ import torch
 import numpy as np
 
 from models.mlp import MLP
-from models.mlp_r import MLPR
+from models.mlp2 import MLP2
 from models.transformer import Transformer
-from models.transformer_r import TransformerR
+from models.transformer2 import Transformer2
 from models.bilstm import ResBiLSTM
-from models.bilstm_r import ResBiLSTMR
+from models.bilstm2 import ResBiLSTM2
 
 
 class AverageMeter(object):
@@ -119,17 +119,41 @@ def construct_model(model_type: str,
     return model
 
 
-def construct_model_r(model_type: str,
-                      weight_matrix: np.ndarray) -> torch.nn.Module:
+def construct_model2(model_type: str,
+                     weight_matrix: np.ndarray) -> torch.nn.Module:
     if model_type == 'mlp':
-        model = MLPR(num_embeddings=weight_matrix.shape[0],
+        model = MLP2(num_embeddings=weight_matrix.shape[0],
                      embedding_matrix=weight_matrix)
     elif model_type == 'transformer':
-        model = TransformerR(num_embeddings=weight_matrix.shape[0],
+        model = Transformer2(num_embeddings=weight_matrix.shape[0],
                              embedding_matrix=weight_matrix)
     elif model_type == 'lstm':
-        model = ResBiLSTMR(num_embeddings=weight_matrix.shape[0],
+        model = ResBiLSTM2(num_embeddings=weight_matrix.shape[0],
                            embedding_matrix=weight_matrix)
     else:
         model = None
     return model
+
+
+def prepare_sample(s1: torch.Tensor,
+                   s2: torch.Tensor,
+                   l1: torch.Tensor,
+                   l2: torch.Tensor,
+                   target: torch.Tensor) -> (torch.autograd.Variable,
+                                             torch.autograd.Variable,
+                                             torch.autograd.Variable,
+                                             torch.autograd.Variable,
+                                             torch.autograd.Variable):
+    if torch.cuda.is_available():
+        s1 = s1.cuda()
+        s2 = s2.cuda()
+        l1 = l1.cuda()
+        l2 = l2.cuda()
+        target = target.cuda()
+
+    s1_var = torch.autograd.Variable(s1)
+    s2_var = torch.autograd.Variable(s2)
+    l1_var = torch.autograd.Variable(l1)
+    l2_var = torch.autograd.Variable(l2)
+    target_var = torch.autograd.Variable(target)
+    return s1_var, s2_var, l1_var, l2_var, target_var

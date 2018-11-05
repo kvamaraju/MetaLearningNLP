@@ -8,9 +8,9 @@ from torch.utils.data import DataLoader
 import torch.backends.cudnn as cudnn
 from tensorboardX import SummaryWriter
 
-from copy import deepcopy
+from losses.entropy import Entropy
 
-from utils import AverageMeter, accuracy, set_directory, construct_optimizer, construct_model, construct_model_r
+from utils import AverageMeter, accuracy, set_directory, construct_optimizer, construct_model, construct_model2, prepare_sample
 from metalearning import ClassifierTask, MetaTrainWrapper, zero_grad
 
 from datasets.mnli import *
@@ -39,23 +39,12 @@ def train_single_epoch(train_loader: Iterable,
         steps += 1
         total_steps += 1
 
-        if torch.cuda.is_available():
-            target = target.cuda(async=True)
-            s1 = s1.cuda()
-            s2 = s2.cuda()
-            l1 = l1.cuda()
-            l2 = l2.cuda()
-
-        s1_var = torch.autograd.Variable(s1)
-        s2_var = torch.autograd.Variable(s2)
-        l1_var = torch.autograd.Variable(l1)
-        l2_var = torch.autograd.Variable(l2)
-        target_var = torch.autograd.Variable(target)
+        s1, s2, l1, l2, target = prepare_sample(s1=s1, s2=s2, l1=l1, l2=l2, target=target)
 
         zero_grad(optimizer)
 
-        output = model(s1_var, s2_var, l1_var, l2_var)
-        loss = criterion(output, target_var)
+        output = model(s1, s2, l1, l2)
+        loss = criterion(output, target)
 
         loss.backward()
         optimizer.step()
@@ -84,11 +73,11 @@ def train_single_epoch(train_loader: Iterable,
     return total_steps
 
 
-def train_single_epoch_with_gradient_reversal(train_loader: Iterable,
-                                              val_loader: Iterable,
+def train_single_epoch_with_gradient_reversal(train_loaders: Iterable,
                                               model: torch.nn.Module,
                                               criterion: torch.nn.modules.loss,
-                                              optimizer: torch.optim.Optimizer,
+                                              optimizer_domain: torch.optim.Optimizer,
+                                              optimizer_classifier: torch.optim.Optimizer,
                                               epoch: int,
                                               alpha: float,
                                               total_steps: int,
@@ -105,84 +94,68 @@ def train_single_epoch_with_gradient_reversal(train_loader: Iterable,
     end = time.time()
     ema_loss, steps = 0, 0
 
-    len_dataloader = len(train_loader)
-    num_loaders = len(train_loader) // len(val_loader) + 1
+    train_loaders = list(train_loaders)
+    len_dataloader = min([len(train_loader) for train_loader in train_loaders])
+    num_loaders = len(train_loaders)
+    train_iters = [iter(train_loader) for train_loader in train_loaders]
 
-    train_iter = iter(train_loader)
-
-    val_generator = (deepcopy(val_loader) for _ in range(num_loaders))
-    val_iter = iter(next(val_generator))
+    entropy = Entropy()
 
     for i in range(len_dataloader):
-        s1_train, s2_train, target_train, l1_train, l2_train = next(train_iter)
-        try:
-            s1_val, s2_val, target_val, l1_val, l2_val = next(val_iter)
-        except:
-            val_iter = iter(next(val_generator))
-            s1_val, s2_val, target_val, l1_val, l2_val = next(val_iter)
-        steps += 1
-        total_steps += 1
+        s1, s2, l1, l2, target = [], [], [], [], []
+
+        for j, train_iter in enumerate(train_iters):
+            s1_train, s2_train, target_train, l1_train, l2_train = next(train_iter)
+            s1_train, s2_train, l1_train, l2_train, target_train = prepare_sample(s1_train, s2_train, l1_train, l2_train, target_train)
+            s1.append(s1_train)
+            s2.append(s2_train)
+            l1.append(l1_train)
+            l2.append(l2_train)
+            target.append(target_train)
+
+        zero_grad(optimizer_domain)
+        loss_domain = torch.zeros(1)
 
         if torch.cuda.is_available():
-            target = target_train.cuda(async=True)
-            s1 = s1_train.cuda()
-            s2 = s2_train.cuda()
-            l1 = l1_train.cuda()
-            l2 = l2_train.cuda()
-        else:
-            target = target_train
-            s1 = s1_train
-            s2 = s2_train
-            l1 = l1_train
-            l2 = l2_train
+            loss_domain = loss_domain.cuda()
 
-        s1_var = torch.autograd.Variable(s1)
-        s2_var = torch.autograd.Variable(s2)
-        l1_var = torch.autograd.Variable(l1)
-        l2_var = torch.autograd.Variable(l2)
-        target_var = torch.autograd.Variable(target)
+        for j, (s1_, s2_, l1_, l2_) in enumerate(zip(s1, s2, l1, l2)):
+            _, domain_output = model(s1_, s2_, l1_, l2_)
 
-        zero_grad(optimizer)
+            target_ = torch.zeros(s1[0].size(0), dtype=torch.int64).fill_(j)
 
-        class_output, domain_output = model(s1_var, s2_var, l1_var, l2_var, alpha=alpha)
-        loss_train = criterion(class_output, target_var)
-        loss_domain = criterion(domain_output, torch.zeros_like(target_var))
+            if torch.cuda.is_available():
+                target_ = target_.cuda()
 
-        prec1 = accuracy(class_output.data, target, topk=(1,))[0]
-        losses.update(loss_train.item(), s1.size(0))
-        top1.update(prec1, s1.size(0))
+            loss_domain += criterion(domain_output, target_)
+
+        loss_domain.backward()
+        optimizer_domain.step()
+
+        zero_grad(optimizer_classifier)
+        loss_classifier = torch.zeros(1)
 
         if torch.cuda.is_available():
-            target = target_val.cuda(async=True)
-            s1 = s1_val.cuda()
-            s2 = s2_val.cuda()
-            l1 = l1_val.cuda()
-            l2 = l2_val.cuda()
-        else:
-            target = target_val
-            s1 = s1_val
-            s2 = s2_val
-            l1 = l1_val
-            l2 = l2_val
+            loss_classifier = loss_classifier.cuda()
 
-        s1_var = torch.autograd.Variable(s1)
-        s2_var = torch.autograd.Variable(s2)
-        l1_var = torch.autograd.Variable(l1)
-        l2_var = torch.autograd.Variable(l2)
-        target_var = torch.autograd.Variable(target)
+        prec = []
+        for j, (s1_, s2_, l1_, l2_, target_) in enumerate(zip(s1, s2, l1, l2, target)):
+            class_output, domain_output = model(s1_, s2_, l1_, l2_)
+            loss_classifier += (criterion(class_output, target_) - alpha * entropy(domain_output)) / num_loaders
+            prec.append(accuracy(class_output.data, target_, topk=(1,))[0])
 
-        _, domain_output = model(s1_var, s2_var, l1_var, l2_var, alpha=alpha)
-        loss_val = criterion(domain_output, torch.ones_like(target_var))
+        loss_classifier.backward()
+        optimizer_classifier.step()
 
-        loss = loss_train + loss_domain + loss_val
-        loss.backward()
-        optimizer.step()
+        prec1 = np.mean(prec)
+        losses.update(loss_classifier.item(), s1[0].size(0))
+        top1.update(prec1, s1[0].size(0))
 
         batch_time.update(time.time() - end)
         end = time.time()
 
         if i % print_freq == 0:
-            print(f' Epoch: [{epoch}][{i}/{len(train_loader)}]\t' +
+            print(f' Epoch: [{epoch}][{i}/{len(train_loaders[0])}]\t' +
                   f'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t' +
                   f'Loss {losses.val:.4f} ({losses.avg:.4f})\t' +
                   f'Prec@1 {top1.val:.3f} ({top1.avg:.3f})')
@@ -213,23 +186,13 @@ def validate(val_loader: Iterable,
 
     end = time.time()
     for i, (s1, s2, target, l1, l2) in enumerate(val_loader):
-        if torch.cuda.is_available():
-            target = target.cuda(async=True)
-            s1 = s1.cuda()
-            s2 = s2.cuda()
-            l1 = l1.cuda()
-            l2 = l2.cuda()
 
-        s1_var = torch.autograd.Variable(s1)
-        s2_var = torch.autograd.Variable(s2)
-        l1_var = torch.autograd.Variable(l1)
-        l2_var = torch.autograd.Variable(l2)
-        target_var = torch.autograd.Variable(target)
+        s1, s2, l1, l2, target = prepare_sample(s1=s1, s2=s2, l1=l1, l2=l2, target=target)
 
-        output = model(s1_var, s2_var, l1_var, l2_var)
+        output = model(s1, s2, l1, l2)
         if isinstance(output, tuple):
             output = output[0]
-        loss = criterion(output, target_var)
+        loss = criterion(output, target)
 
         prec1 = accuracy(output.data, target, topk=(1,))[0]
         losses.update(loss.item(), s1.size(0))
@@ -289,7 +252,7 @@ def train_mnli(**kwargs):
 
     val_loader = [DataLoader(
         MultiNLIDataset(dataset=loader),
-        batch_size=kwargs['batch_size'],
+        batch_size=2000,
         shuffle=True,
         num_workers=1,
         pin_memory=torch.cuda.is_available()) for loader in [dev_matched, dev_mismatched]]
@@ -371,7 +334,7 @@ def train_mnli_kshot(**kwargs):
 
     val_loader = DataLoader(
         MultiNLIDataset(dataset=dev_matched_train[0]),
-        batch_size=kwargs['batch_size'],
+        batch_size=2000,
         shuffle=True,
         num_workers=1,
         pin_memory=torch.cuda.is_available())
@@ -427,7 +390,7 @@ def train_mnli_kshot(**kwargs):
 
     val_loader = [DataLoader(
         MultiNLIDataset(dataset=dataset[0]),
-        batch_size=kwargs['batch_size'],
+        batch_size=2000,
         shuffle=True,
         num_workers=1,
         pin_memory=torch.cuda.is_available()) for dataset in [dev_matched_test, dev_mismatched_test]]
@@ -481,13 +444,12 @@ def train_mnli_kshot(**kwargs):
 
 @cli.command()
 @click.option('--type', type=click.Choice(['mlp', 'transformer', 'lstm']), default='mlp')
-@click.option('--optim', type=click.Choice(['adam', 'adadelta', 'adagrad', 'adamax', 'rmsprop', 'rprop', 'sgd']), default='adam')
 @click.option('--lr', default=0.001, type=float)
 @click.option('--epochs', default=100, type=int)
 @click.option('--batch-size', default=100, type=int)
 @click.option('--print-freq', default=100, type=int)
 @click.option('--device', type=int, default=0)
-def train_mnli_gradient_reversal(**kwargs):
+def train_mnli_domain_invariant(**kwargs):
     dir = set_directory(name=kwargs['type'], type_net=kwargs['type'])
     writer = SummaryWriter(dir)
 
@@ -496,36 +458,30 @@ def train_mnli_gradient_reversal(**kwargs):
                                                                                                       dir='MultiNLI',
                                                                                                       name='MultiNLI',
                                                                                                       data_path='datasets/data/MultiNLI/multinli_1.0',
-                                                                                                      train_genres=[['government', 'telephone', 'slate', 'travel']],
+                                                                                                      train_genres=[['government'], ['telephone'], ['slate'], ['travel']],
                                                                                                       test_genres=[['fiction']],
                                                                                                       max_len=60)
 
     weight_matrix = prepare_glove(glove_path="datasets/GloVe/glove.840B.300d.txt",
                                   vocab=vocab)
 
-    train_loader = DataLoader(
-        MultiNLIDataset(dataset=train[0]),
+    train_loaders = [DataLoader(
+        MultiNLIDataset(dataset=t),
+        drop_last=True,
         batch_size=kwargs['batch_size'],
         shuffle=True,
         num_workers=1,
-        pin_memory=torch.cuda.is_available())
+        pin_memory=torch.cuda.is_available()) for t in train]
 
-    test_loader = DataLoader(
-        MultiNLIDataset(dataset=test[0]),
-        batch_size=kwargs['batch_size'],
-        shuffle=True,
-        num_workers=1,
-        pin_memory=torch.cuda.is_available())
+    val_matched_loaders = [DataLoader(
+                           MultiNLIDataset(dataset=t),
+                           batch_size=2000,
+                           shuffle=True,
+                           num_workers=1,
+                           pin_memory=torch.cuda.is_available()) for t in dev_matched_train]
 
-    val_loader = DataLoader(
-        MultiNLIDataset(dataset=dev_matched_train[0]),
-        batch_size=kwargs['batch_size'],
-        shuffle=True,
-        num_workers=1,
-        pin_memory=torch.cuda.is_available())
-
-    model = construct_model_r(model_type=kwargs['type'],
-                              weight_matrix=weight_matrix)
+    model = construct_model2(model_type=kwargs['type'],
+                             weight_matrix=weight_matrix)
 
     num_parameters = sum([p.data.nelement() for p in model.parameters()])
     print(f'Number of model parameters: {num_parameters}')
@@ -539,32 +495,37 @@ def train_mnli_gradient_reversal(**kwargs):
     else:
         loss_function = torch.nn.CrossEntropyLoss()
 
-    optimizer = construct_optimizer(optimizer=kwargs['optim'],
-                                    model=model,
-                                    lr=kwargs['lr'])
+    optimizer_domain = torch.optim.Adam(model.domain_layer.parameters(), lr=kwargs['lr'], amsgrad=True)
+    optimizer_classifier = torch.optim.Adam((p for p in model.parameters() if p not in set(model.domain_layer.parameters())),
+                                            lr=kwargs['lr'],
+                                            amsgrad=True)
 
     cudnn.benchmark = True
 
     total_steps = 0
 
     for epoch in tqdm(range(kwargs['epochs'])):
-        total_steps = train_single_epoch_with_gradient_reversal(train_loader=train_loader,
-                                                                val_loader=test_loader,
+        total_steps = train_single_epoch_with_gradient_reversal(train_loaders=train_loaders,
                                                                 model=model,
                                                                 criterion=loss_function,
-                                                                optimizer=optimizer,
+                                                                optimizer_domain=optimizer_domain,
+                                                                optimizer_classifier=optimizer_classifier,
                                                                 epoch=epoch,
-                                                                alpha=1e-2,
+                                                                alpha=0.1,
                                                                 total_steps=total_steps,
                                                                 print_freq=kwargs['print_freq'],
                                                                 writer=writer)
 
-        validate(val_loader=val_loader,
-                 model=model,
-                 criterion=loss_function,
-                 epoch=epoch,
-                 print_freq=kwargs['print_freq'],
-                 writer=writer)
+        print(f'Epoch {epoch + 1} Validation')
+        prec = []
+        for loader in val_matched_loaders:
+            prec.append(validate(val_loader=loader,
+                                 model=model,
+                                 criterion=loss_function,
+                                 epoch=epoch,
+                                 print_freq=kwargs['print_freq'],
+                                 writer=writer))
+        print(f'Average Matched Precision is {np.mean(prec)}')
 
     print('Zero Shot Performance')
 

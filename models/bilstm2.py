@@ -3,8 +3,6 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 
-from functions.gradientreversal import GradientReversalFunction
-
 from copy import deepcopy
 
 import numpy as np
@@ -13,7 +11,7 @@ import numpy as np
 # Based on "Shortcut-Stacked Sentence Encoders for Multi-Domain Inference"
 # (https://arxiv.org/abs/1708.02312)
 # (https://github.com/easonnie/ResEncoder/blob/master/model/res_encoder.py)
-class ResBiLSTMR(nn.Module):
+class ResBiLSTM2(nn.Module):
     def __init__(self,
                  embedding_matrix: np.ndarray = None,
                  num_embeddings: int = 196245,
@@ -21,8 +19,9 @@ class ResBiLSTMR(nn.Module):
                  hidden_dim: Iterable = (600, 600, 600),
                  mlp_dim: int = 800,
                  dropout_prob: float = 0.1,
-                 max_sequence_len: int = 60):
-        super(ResBiLSTMR, self).__init__()
+                 max_sequence_len: int = 60,
+                 num_genres: int = 4):
+        super(ResBiLSTM2, self).__init__()
 
         self.embedding_layer = nn.Embedding(num_embeddings, embedding_dim)
         if embedding_matrix is not None:
@@ -42,7 +41,7 @@ class ResBiLSTMR(nn.Module):
 
         self.mlp_1 = nn.Linear(hidden_dim[2] * 2 * 4, mlp_dim)
         self.final_layer = nn.Linear(mlp_dim, 3)
-        self.domain_layer = nn.Linear(mlp_dim, 2)
+        self.domain_layer = nn.Linear(mlp_dim, num_genres)
 
         self.classifier = nn.Sequential(*[self.mlp_1,
                                           nn.ReLU(),
@@ -109,8 +108,7 @@ class ResBiLSTMR(nn.Module):
                 s1: torch.Tensor,
                 s2: torch.Tensor,
                 l1: torch.Tensor,
-                l2: torch.Tensor,
-                alpha: np.float32 = -1.0) -> (torch.Tensor, torch.Tensor):
+                l2: torch.Tensor) -> (torch.Tensor, torch.Tensor):
         if self.max_sequence_len:
             if isinstance(l1, int):
                 l1 = torch.from_numpy(np.array([l1 for _ in range(s1.shape[0])], dtype=int))
@@ -156,7 +154,7 @@ class ResBiLSTMR(nn.Module):
 
         classifier = self.classifier(features)
 
-        return self.final_layer(classifier), self.domain_layer(GradientReversalFunction.apply(classifier, alpha))
+        return self.final_layer(classifier), self.domain_layer(classifier)
 
     def load_params(self,
                     params: list):
