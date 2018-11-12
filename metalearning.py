@@ -1,6 +1,8 @@
 from collections import OrderedDict
 from typing import Iterable
 
+from losses.entropy import Entropy
+
 import torch
 import torch.nn as nn
 
@@ -39,6 +41,42 @@ class ClassifierTask(nn.Module):
         return self.loss_fn(output, target)
 
 
+class ClassifierTask2(nn.Module):
+    def __init__(self):
+        super(ClassifierTask2, self).__init__()
+        if torch.cuda.is_available():
+            self.loss_fn = torch.nn.CrossEntropyLoss().cuda()
+        else:
+            self.loss_fn = torch.nn.CrossEntropyLoss()
+        self.regularizer = Entropy()
+
+    def forward(self,
+                module: torch.nn.Module,
+                inputs: tuple,
+                task_number: int = 0,
+                alpha: float = 0.1,
+                **kwargs):
+
+        s1 = inputs[0]
+        s2 = inputs[1]
+        target = inputs[2]
+        l1 = inputs[3]
+        l2 = inputs[4]
+
+        target_ = torch.zeros(s1.size(0), dtype=torch.int64).fill_(int(task_number))
+
+        if torch.cuda.is_available():
+            s1 = s1.cuda()
+            s2 = s2.cuda()
+            target = target.cuda()
+            l1 = l1.cuda()
+            l2 = l2.cuda()
+            target_ = target_.cuda()
+
+        class_output, domain_output = module(s1, s2, l1, l2, **kwargs)
+        return self.loss_fn(domain_output, target_), self.loss_fn(class_output, target) - alpha * self.regularizer(domain_output)
+
+
 class GradientTaskModule(nn.Module):
     def __init__(self):
         super(GradientTaskModule, self).__init__()
@@ -50,13 +88,43 @@ class GradientTaskModule(nn.Module):
                 params_for_grad: list,
                 compute_grad: bool = True,
                 create_graph: bool = False,
-                gradient_average: float = 1., ):
+                gradient_average: float = 1.):
 
         criterion = task(module=module,
                          inputs=input_batch)
         if compute_grad:
-            return torch.autograd.grad(criterion / gradient_average, params_for_grad,
+            return torch.autograd.grad(criterion / gradient_average,
+                                       params_for_grad,
                                        create_graph=create_graph)
+
+
+class GradientTaskModule2(nn.Module):
+    def __init__(self):
+        super(GradientTaskModule2, self).__init__()
+
+    def forward(self,
+                task: ClassifierTask2,
+                module: torch.nn.Module,
+                input_batch: Iterable,
+                domain_params_for_grad: list,
+                classifier_params_for_grad: list,
+                compute_grad: bool = True,
+                create_graph: bool = False,
+                gradient_average: float = 1.,
+                task_number: int = 0):
+
+        domain_criterion, classifier_criterion = task(module=module,
+                                                      inputs=input_batch,
+                                                      task_number=task_number)
+        if compute_grad:
+            return torch.autograd.grad(domain_criterion / gradient_average,
+                                       domain_params_for_grad,
+                                       create_graph=create_graph,
+                                       retain_graph=True), \
+                   torch.autograd.grad(classifier_criterion / gradient_average,
+                                       classifier_params_for_grad,
+                                       create_graph=create_graph,
+                                       retain_graph=True)
 
 
 class MAML(nn.Module):
@@ -225,16 +293,139 @@ class Reptile(nn.Module):
                                               lr=self.inner_lr,
                                               inplace=False)
                 set_params_with_grad(module=self.module,
-                                 params=new_params)
+                                     params=new_params)
         self.module.train(training_status)
         return new_params
+
+
+class Reptile2(nn.Module):
+    def __init__(self,
+                 module: torch.nn.Module,
+                 inner_lr: float,
+                 sample_task: bool = True,
+                 distributed: bool = False):
+        super(Reptile2, self).__init__()
+        self.module = module
+        self.inner_lr = inner_lr
+        self.sample_task = sample_task
+        self.gradient_task = GradientTaskModule2()
+        self.distributed = distributed
+        if self.distributed:
+            for p in self.module.state_dict().values():
+                if torch.is_tensor(p):
+                    torch.distributed.broadcast(p, 0)
+
+    def forward(self,
+                tasks: list,
+                train_batch: list,
+                val_loaders: list):
+
+        assert len(tasks) == len(train_batch)
+        num_tasks = len(tasks)
+
+        if self.sample_task:
+            i = np.random.choice(range(num_tasks))
+
+            domain_params_for_grad = [p for p in self.module.domain_layer.parameters() if p is not None
+                                      and p.requires_grad]
+            classifier_params_for_grad = [p for p in self.module.parameters() if p is not None
+                                          and p.requires_grad
+                                          and p not in set(self.module.domain_layer.parameters())]
+
+            new_domain_params, new_classifier_params = self.inner_loop(task=tasks[i],
+                                                                       loader=train_batch[i],
+                                                                       domain_params_for_grad=domain_params_for_grad,
+                                                                       classifier_params_for_grad=classifier_params_for_grad,
+                                                                       task_number=i)
+            domain_grads = [x - y for x, y in zip(domain_params_for_grad, new_domain_params)]
+            classifier_grads = [x - y for x, y in zip(classifier_params_for_grad, new_classifier_params)]
+        else:
+            domain_grads = [torch.zeros_like(p) for p in self.module.domain_layer.parameters() if p is not None
+                            and p.requires_grad]
+            classifier_grads = [torch.zeros_like(p) for p in self.module.parameters() if p is not None
+                                and p.requires_grad
+                                and p not in set(self.module.domain_layer.parameters())]
+            meta_param_dict = param_dict(self.module, clone=True)
+
+            for i, _ in enumerate(train_batch):
+                load_param_dict(self.module, meta_param_dict)
+
+                domain_params_for_grad = [p for p in self.module.domain_layer.parameters() if p is not None
+                                          and p.requires_grad]
+                classifier_params_for_grad = [p for p in self.module.parameters() if p is not None
+                                              and p.requires_grad
+                                              and p not in set(self.module.domain_layer.parameters())]
+
+                new_domain_params, new_classifier_params = self.inner_loop(task=tasks[i],
+                                                                           loader=train_batch[i],
+                                                                           domain_params_for_grad=domain_params_for_grad,
+                                                                           classifier_params_for_grad=classifier_params_for_grad,
+                                                                           task_number=i)
+
+                domain_grads = [z + x - y for x, y, z in zip(domain_params_for_grad, new_domain_params, domain_grads)]
+                classifier_grads = [z + x - y for x, y, z in zip(classifier_params_for_grad, new_classifier_params, classifier_grads)]
+
+            domain_grads = [g.div(num_tasks) for g in domain_grads]
+            classifier_grads = [g.div(num_tasks) for g in classifier_grads]
+
+            load_param_dict(self.module, meta_param_dict)
+            domain_params_for_grad = [p for p in self.module.domain_layer.parameters() if p is not None
+                                      and p.requires_grad]
+            classifier_params_for_grad = [p for p in self.module.parameters() if p is not None
+                                          and p.requires_grad
+                                          and p not in set(self.module.domain_layer.parameters())]
+
+        set_grads_for_params(params=domain_params_for_grad, grads=domain_grads)
+        set_grads_for_params(params=classifier_params_for_grad, grads=classifier_grads)
+
+        if self.distributed:
+            reduce_gradients(self.module)
+
+    def inner_loop(self,
+                   task: ClassifierTask2,
+                   loader: Iterable,
+                   domain_params_for_grad: list,
+                   classifier_params_for_grad: list,
+                   task_number: int) -> (list, list):
+
+        training_status = self.training
+        self.module.train()
+
+        for input_batch in loader:
+            with torch.enable_grad():
+                domain_grads, classifier_grads = self.gradient_task(task=task,
+                                                                    module=self.module,
+                                                                    input_batch=input_batch,
+                                                                    domain_params_for_grad=domain_params_for_grad,
+                                                                    classifier_params_for_grad=classifier_params_for_grad,
+                                                                    create_graph=False,
+                                                                    task_number=task_number)
+                new_domain_params = grad_step_params(params=domain_params_for_grad,
+                                                     grads=domain_grads,
+                                                     lr=self.inner_lr,
+                                                     inplace=False)
+
+                set_params_with_grad(module=self.module.domain_layer,
+                                     params=new_domain_params)
+
+                new_classifier_params = grad_step_params(params=classifier_params_for_grad,
+                                                         grads=classifier_grads,
+                                                         lr=self.inner_lr,
+                                                         inplace=False)
+
+                set_params_with_grad(module=self.module,
+                                     params=new_classifier_params,
+                                     blacklist=set([p for p in self.module.domain_layer.parameters()]))
+
+        self.module.train(training_status)
+        return new_domain_params, new_classifier_params
 
 
 class MetaTrainWrapper(nn.Module):
     def __init__(self,
                  module: nn.Module,
                  inner_lr: float,
-                 use_maml: bool = True,
+                 meta_module: str = 'reptile',
                  optim: torch.optim.Optimizer = None,
                  second_order: bool = False,
                  sample_task: bool = True,
@@ -247,14 +438,20 @@ class MetaTrainWrapper(nn.Module):
         self.distributed = distributed
         self.init_distributed(world_size, rank)
 
-        if use_maml:
+        if meta_module == 'maml':
             self.meta_module = MAML(module=self.module,
                                     inner_lr=inner_lr,
                                     second_order=second_order)
-        else:
+        elif meta_module == 'reptile':
             self.meta_module = Reptile(module=self.module,
                                        inner_lr=inner_lr,
                                        sample_task=sample_task)
+        elif meta_module == 'reptile2':
+            self.meta_module = Reptile2(module=self.module,
+                                        inner_lr=inner_lr,
+                                        sample_task=sample_task)
+        else:
+            assert False
 
     def train(self, mode=True):
         assert self.optim is not None
@@ -458,12 +655,14 @@ def get_params_for_grad(module: torch.nn.Module,
 
 
 def set_params_with_grad(module: torch.nn.Module,
-                         params: list):
+                         params: list,
+                         blacklist: set = None):
     j = 0
     for _, param in module.named_parameters():
         if param is not None and param.requires_grad:
-            param = params[j]
-            j += 1
+            if blacklist is None or (blacklist is not None and param not in blacklist):
+                param = params[j]
+                j += 1
 
 
 def zero_grad(optimizer: torch.optim.Optimizer):

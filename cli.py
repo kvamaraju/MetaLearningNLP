@@ -11,7 +11,7 @@ from tensorboardX import SummaryWriter
 from losses.entropy import Entropy
 
 from utils import AverageMeter, accuracy, set_directory, construct_optimizer, construct_model, construct_model2, prepare_sample
-from metalearning import ClassifierTask, MetaTrainWrapper, zero_grad
+from metalearning import ClassifierTask, ClassifierTask2, MetaTrainWrapper, zero_grad
 
 from datasets.mnli import *
 
@@ -73,17 +73,17 @@ def train_single_epoch(train_loader: Iterable,
     return total_steps
 
 
-def train_single_epoch_with_gradient_reversal(train_loaders: Iterable,
-                                              model: torch.nn.Module,
-                                              criterion: torch.nn.modules.loss,
-                                              optimizer_domain: torch.optim.Optimizer,
-                                              optimizer_classifier: torch.optim.Optimizer,
-                                              epoch: int,
-                                              alpha: float,
-                                              total_steps: int,
-                                              print_freq: int,
-                                              writer: SummaryWriter,
-                                              num_batches: int = None) -> int:
+def train_single_epoch2(train_loaders: Iterable,
+                        model: torch.nn.Module,
+                        criterion: torch.nn.modules.loss,
+                        optimizer_domain: torch.optim.Optimizer,
+                        optimizer_classifier: torch.optim.Optimizer,
+                        epoch: int,
+                        alpha: float,
+                        total_steps: int,
+                        print_freq: int,
+                        writer: SummaryWriter,
+                        num_batches: int = None) -> int:
 
     batch_time = AverageMeter()
     losses = AverageMeter()
@@ -505,16 +505,16 @@ def train_mnli_domain_invariant(**kwargs):
     total_steps = 0
 
     for epoch in tqdm(range(kwargs['epochs'])):
-        total_steps = train_single_epoch_with_gradient_reversal(train_loaders=train_loaders,
-                                                                model=model,
-                                                                criterion=loss_function,
-                                                                optimizer_domain=optimizer_domain,
-                                                                optimizer_classifier=optimizer_classifier,
-                                                                epoch=epoch,
-                                                                alpha=0.1,
-                                                                total_steps=total_steps,
-                                                                print_freq=kwargs['print_freq'],
-                                                                writer=writer)
+        total_steps = train_single_epoch2(train_loaders=train_loaders,
+                                          model=model,
+                                          criterion=loss_function,
+                                          optimizer_domain=optimizer_domain,
+                                          optimizer_classifier=optimizer_classifier,
+                                          epoch=epoch,
+                                          alpha=0.1,
+                                          total_steps=total_steps,
+                                          print_freq=kwargs['print_freq'],
+                                          writer=writer)
 
         print(f'Epoch {epoch + 1} Validation')
         prec = []
@@ -563,7 +563,7 @@ def train_mnli_domain_invariant(**kwargs):
 @click.option('--type', type=click.Choice(['mlp', 'transformer', 'lstm']), default='mlp')
 @click.option('--optim', type=click.Choice(['adam', 'adadelta', 'adagrad', 'adamax', 'rmsprop', 'rprop', 'sgd']), default='adam')
 @click.option('--use-maml', type=bool, default=False)
-@click.option('--k', default=5, type=int)
+@click.option('--k', default=0, type=int)
 @click.option('--lr-inner-meta', default=0.001, type=float)
 @click.option('--lr-outer-meta', default=0.001, type=float)
 @click.option('--num-inner-iterations', default=1, type=int)
@@ -571,6 +571,7 @@ def train_mnli_domain_invariant(**kwargs):
 @click.option('--epochs', default=20, type=int)
 @click.option('--batch-size', default=100, type=int)
 @click.option('--print-freq', default=100, type=int)
+@click.option('--use-alt', type=bool, default=False)
 @click.option('--device', type=int, default=0)
 def train_mnli_meta(**kwargs):
     train, dev_matched_train, test, dev_matched_test, dev_mismatched_test, vocab = prepare_mnli_split(root='datasets/data',
@@ -599,8 +600,12 @@ def train_mnli_meta(**kwargs):
                            num_workers=1,
                            pin_memory=torch.cuda.is_available()) for t in dev_matched_train]
 
-    model = construct_model(model_type=kwargs['type'],
-                            weight_matrix=weight_matrix)
+    if kwargs['use_alt']:
+        model = construct_model2(model_type=kwargs['type'],
+                                 weight_matrix=weight_matrix)
+    else:
+        model = construct_model(model_type=kwargs['type'],
+                                weight_matrix=weight_matrix)
 
     num_parameters = sum([p.data.nelement() for p in model.parameters()])
     print(f'Number of model parameters: {num_parameters}')
@@ -616,13 +621,20 @@ def train_mnli_meta(**kwargs):
     else:
         loss_function = torch.nn.CrossEntropyLoss()
 
+    if kwargs['use_maml']:
+        meta = 'maml'
+    elif kwargs['use_alt']:
+        meta = 'reptile2'
+    else:
+        meta = 'reptile'
+
     optimizer = construct_optimizer(optimizer=kwargs['optim'],
                                     model=model,
                                     lr=kwargs['lr_outer_meta'])
 
     meta_model = MetaTrainWrapper(module=model,
                                   inner_lr=kwargs['lr_inner_meta'],
-                                  use_maml=kwargs['use_maml'],
+                                  meta_module=meta,
                                   optim=optimizer,
                                   second_order=True,
                                   sample_task=True)
@@ -632,7 +644,7 @@ def train_mnli_meta(**kwargs):
     meta_model.train()
     for epoch in range(kwargs['epochs']):
         for train_batch in tqdm(train_batcher):
-            meta_model(tasks=[ClassifierTask() for _ in range(len(train_loaders))],
+            meta_model(tasks=[ClassifierTask2() if kwargs['use_alt'] else ClassifierTask() for _ in range(len(train_loaders))],
                        train_batch=train_batch,
                        val_loaders=train_loaders)
 
